@@ -1,0 +1,99 @@
+# pxb7-price-monitor 运行配置
+# 口径来源：docs/01 §2（站点实测）/ §3.1（采集姿态与限速）/ §3.3（风控退避）/ §4（数据模型）
+#
+# 路径约定（重要）：
+#   本文件中 paths.* 与 snapshot.* 之外的内部路径，一律以【项目根】为基准解析
+#   （项目根 = 含 run.py/config/pxb7 的目录），不依赖调用时的 CWD。
+#   CLI 显式传入的 --db 等路径参数，则按【调用时 CWD】解析（见 pxb7/config.py）。
+#   凭据只从环境变量读取，本文件不含任何凭据字面量。
+
+project:
+  name: pxb7-price-monitor
+  # 路径基准说明：项目根由 pxb7/config.py 从 __file__ 推导，不读 CWD。
+
+paths:
+  db: data/pxb7.duckdb                 # strict 主库（docs/01 §4）
+  raw_root: data/raw/pxb7              # bronze：原始 DOM dump 落盘根（docs/01 §4）
+  state_dir: data/state                # 登录态目录
+  storage_primary: data/state/storage_primary.json   # 主登录态（docs/01 §3.1-2 主备双号）
+  storage_backup: data/state/storage_backup.json     # 备登录态
+  risk_state: data/state/risk_state.json             # 风控状态机持久化（docs/01 §3.3）
+  log_dir: data/logs
+  runs: data/runs                      # 轮次 summary 与 A4 告警 JSONL 落盘（QC 数据源）
+
+site:
+  base_url: https://www.pxb7.com       # 2026-10-02 实测可达（/buy/10026/1 → HTTP 200）
+  # URL 守卫白名单：仅 http/https + 下列 host 允许请求（拒绝 localhost/环回/私有/保留地址）
+  allowed_hosts:
+    - www.pxb7.com
+    - pxb7.com
+  paths:
+    listing: /buy/{game_id}/{biz_prod}     # 列表页（docs/01 §2 URL 规律）
+    detail: /product/{listing_id}/1        # 详情页
+  respect_robots: true                 # robots: User-agent * → Allow: /（docs/01 §2）
+  resolve_dns: true                    # 导航前解析 host，拒绝解析到内网/环回（SSRF 纵深防御）
+
+rate_limit:                            # docs/01 §3.1-4（登录态不放松限速）
+  page_interval_sec: [3, 6]            # 单页间隔 3–6s 随机
+  task_interval_sec: 60                # 任务间 ≥60s
+  max_pages_per_run: 5                 # 每任务每轮 ≤5 页
+  runs_per_day: [2, 4]                 # 每任务每日 2–4 轮（任务可在 tasks.yaml 覆写）
+  # 档位系数（乘在单页间隔上；>1 = 更慢）
+  # docs/01 §3.3 登录态运行纪律：限速档与游客态**完全一致**（登录只解锁可见性，不加压）
+  login_factor: 1.0
+  guest_factor: 1.0                    # 游客态与登录态同档（v1 曾误设为 4.0，已按文档改正）
+  backup_state_factor: 2.0             # 主登录态被风控/踢出 → 切备用，频率降至 1/2（§3.3）
+  probe_factor: 4.0                    # 验证码/滑块后 24h 试探恢复 → 1/4 频率（§3.3）
+
+risk_control:                          # docs/01 §3.3 风控退避（采集器硬逻辑阈值）
+  captcha:
+    stop_task_immediately: true        # 出现验证码/滑块：立即停采该任务
+    probe_after_hours: 24              # 24h 后以 1/4 频率试探恢复
+    escalate_after_consecutive: 2      # 连续 2 次 → 停并告警
+  empty_response:
+    ratio_threshold: 0.30              # 请求被拒/空响应率 >30%：当轮终止
+    backoff_hours: 6                   # 退避 6h
+  ip_blocked:
+    action: stop_and_manual            # 整站不可达：停止采集，人工介入
+  login_state:
+    switch_to_backup: true             # 主登录态被风控/踢出 → 切备用并降频
+    observe_hours_after_both_invalid: 72   # 主备均失效 → 游客态 + 72h 观察后人工换号
+    retry_login_forbidden: true        # 不连续重试登录
+    allow_concurrent_tasks: false      # 同一登录态不做多任务并发
+  parse_health:
+    success_ratio_threshold: 0.80      # 卡片解析成功率 <80% → 只入 raw 层 + 解析告警
+
+quality:                               # docs/01 §5 QC（每日自动）
+  snapshot_gap_max_hours: 36           # 快照断档 ≤36h
+  parse_success_ratio_min: 0.80        # 卡片解析成功率 ≥80%
+  min_cell_sample: 30                  # 指数/阶段子域样本门槛（<30 不发布，不伪造）
+
+snapshot:
+  round_minutes: 30                    # snapshot_at 截断粒度：一个"轮次"= 该时长的桶
+
+collect:
+  headless: false                      # 2026-10-03 试运行实测：无头模式即便带登录态仍被 WAF 拦截
+                                       # （登录会话在真实浏览器窗口畅通）；改为有头=「真实浏览器渲染」
+                                       # 的字面实现，不含任何指纹伪造。无人值守调度时请评估窗口占用。
+  default_mode: login                  # login / guest（guest 仅失效降级通道）
+  parser_version: v0.2.0               # 解析器版本（v0.2.0：2026-10-03 真实 DOM 校准；pub 进快照，site 改版可重放 raw）
+  navigation_timeout_ms: 45000
+  selector_timeout_ms: 20000
+  pagination:
+    strategy: url                      # url=按 query 参数翻页（缺省）；click=点下一页（回退策略）
+    page_param: page                   # 翻页参数名待 W1 冒烟实测校准（契约 openQuestions）
+    first_page_param: null             # 首页是否带参数；null=不带
+    next_button_selectors: []          # click 策略的选择器（≥1 个候选，未配置则 click 不可用）
+    page_settle_ms: 800                # 翻页后等待渲染稳定的最短时间
+  detail:
+    enabled: true                      # 采集详情页需求侧字段（M5：正在浏览 / 收藏）
+    store_raw: true                    # 详情页 HTML 是否落 raw（排障与重解析）
+  dump_html: true                      # 列表页 HTML 落 raw（改版后可重放）
+  delist_window_hours: 48              # 在售窗口：last_seen 早于 now-48h 才推断下架
+                                       # （下架≠成交，仅作成交推断口径；本轮非完整覆盖时不得推断）
+
+notify:
+  webhook_url: ""                      # 留空 = 不推送；真实值只从环境变量读取
+  webhook_env: PXB7_NOTIFY_WEBHOOK
+  business_channel_env: PXB7_NOTIFY_BUSINESS   # A1–A3/A5 业务预警
+  ops_channel_env: PXB7_NOTIFY_OPS             # A4 采集健康告警（分渠道，docs/01 §6）

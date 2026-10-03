@@ -1,0 +1,620 @@
+# 原神词表 v0 种子（dim_keyword 行数据）
+# 出处：docs/02 §4.A1 原神（10026，模板详例）为主 + §4.A0 五游戏共享 floor 词（A0 明确「五游戏通用」）
+# 生成：pxb7/extract.py 读本文件 → dim_keyword（INSERT OR REPLACE，按 keyword_id 幂等）
+#
+# 类型取值照 dim_keyword 枚举：ceiling / floor / risk / resource / segment（docs/02 §3）
+#   §4.A1 表中的 structure 行按契约 openQuestions 处理：[卡] 列表卡片结构化字段由 DOM 解析器
+#   直接写入快照，不建 dim_keyword 行。故下列 §4.A1 structure 词条【不】入本种子，避免重复口径：
+#     主角性别、等级、黄数、五星角色、五星武器、圣遗物、时装（纯 [卡]）
+#     活邮/提供换绑码、米游社绑定（[卡/筛] 绑定状态，由 parser 的 mail_status / trade_code_status /
+#       tap_status 字段承接；如需标题级命中，按契约建议按 floor 或 risk 归类后再补行）
+#   §4.A1 的「当期/复刻人气 UP 角色（词表随卡池周更）」文档未给具体名单 → 保留占位行且 enabled=false，
+#   具体角色名待 card-pool 周更时补（不臆造文档未定义的角色名）。
+# 数值先验仅用于 weight_v0 量级标定（sanity check），不作硬编码价格（docs/02 §4.A1 注）。
+# 本文件不得出现任何凭据/登录态内容。
+
+# 鸣潮画像 wuwa_10302（2026-10-03 新增；genshin_10026 画像逐字节保持不变）
+# 出处：2026-10-03 站内实样 MVNGK0804（用户复制的商品文字，gameId 10302）+ docs/02 §4.A0 五游戏同构表
+#       + docs/02 §4.A4 + docs/03 §1.4 定价推理 —— 站内实样校准
+# 样文优先：文档写「0+1 / 6链/满链」，实样写「N命」「精N」——凡冲突处以实样为准，两套记法抽取器都认。
+# 类型：dim_keyword 枚举无 structure（pxb7/extract.py:38）→ 计数/记法类非锚点行统一记 segment
+#       + price_anchor=none（docs/02 §4.A4 注），§4.A4 表里的 structure 行只是文档分类。
+# 权重：weight_v0 未标定（分析师只给证据置信度、未给价格重要性先验）→ 留 null，按 §7 校准闭环回填；
+#       每行上方注释含 keyword_id、证据来源与 confidence（high=样文直接实测 / medium=文档支撑待实测）。
+# 注意：本文件不得出现任何凭据/登录态内容。
+
+version: v0.2.0
+generated_from: docs/02 §4.A0 + §4.A1 + §4.A4
+doc_version: v0.3（2026-10-03）
+updated_at: '2026-10-03'
+
+profiles:
+  - profile_id: genshin_10026
+    game_id: 10026
+    game_name: 原神
+    keyword_profile: genshin_v0          # 与 dim_game.keyword_profile 对齐
+    source: 站内实测 + 公开资料查证
+    keywords:
+      # ---------------- ceiling 天花板（§4.A1 ceiling 7 组）----------------
+      - keyword_id: ys_ceiling_manming
+        keyword: 满命
+        keyword_type: ceiling
+        extract_pattern: '(满命|(?:\d|六)\s*命)'
+        feature_map: constellation_cnt
+        price_anchor: ceiling
+        weight_v0: 0.9                   # 满命满精图鉴 2w+（§4.A1 数值先验）
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_zhuanwu
+        keyword: 专武
+        keyword_type: ceiling
+        extract_pattern: '(专武)'
+        feature_map: signature_weapon_flag
+        price_anchor: ceiling
+        weight_v0: 0.6
+        weight_v1: null
+        weight_v2: null
+        source: 查证                 # §4.A0 专武槽位（原神=专武/精五/满精）
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_jingwu
+        keyword: 精五
+        keyword_type: ceiling
+        extract_pattern: '(满精|精[1-5一二三四五])'
+        feature_map: five_star_weapon_refined
+        price_anchor: ceiling
+        weight_v0: 0.8                   # 精5五星专武 +300–800 元/把；满精 2w 起
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_quantujian
+        keyword: 全图鉴
+        keyword_type: ceiling
+        extract_pattern: '(全图鉴|全角色|图鉴全)'
+        feature_map: full_collection_flag
+        price_anchor: ceiling
+        weight_v0: 0.7                   # 全五星活邮 6–7k 起
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_up_role
+        keyword: 当期UP角色
+        keyword_type: ceiling
+        extract_pattern: null            # 占位：具体角色名随卡池周更（fct_event），文档未给名单
+        feature_map: up_character_flag
+        price_anchor: ceiling
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: template
+        enabled: false                   # 未填具体词条前不参与抽取，避免误报
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_shuangbao
+        keyword: 双爆毕业
+        keyword_type: ceiling
+        extract_pattern: '(双爆毕业|双爆全|毕业双爆)'
+        feature_map: artifact_crit_ready_flag
+        price_anchor: ceiling
+        weight_v0: 0.4
+        weight_v1: null
+        weight_v2: null
+        source: 查证                 # §4.A0 装备槽位（原神=圣遗物/双爆）
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_ceiling_abyss
+        keyword: 深渊满星
+        keyword_type: ceiling
+        extract_pattern: '(深渊满星|12层满星|深渊12层)'
+        feature_map: abyss_full_star_flag
+        price_anchor: ceiling
+        weight_v0: 0.3
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+
+      # ---------------- resource 资源（§4.A1 resource 4 组）----------------
+      - keyword_id: ys_resource_primogem
+        keyword: 原石
+        keyword_type: resource
+        extract_pattern: '原石\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: primogems_cnt
+        price_anchor: none
+        weight_v0: 0.5                   # F4 资源存量；按抽卡期望折算（docs/03）
+        weight_v1: null
+        weight_v2: null
+        source: 实测                 # §4.A1 标 [卡/筛]，卡片字段直接可得
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_resource_fate
+        keyword: 纠缠之源
+        keyword_type: resource
+        extract_pattern: '纠缠(?:之源)?\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: intertwined_fate_cnt
+        price_anchor: none
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_resource_resin
+        keyword: 脆弱树脂
+        keyword_type: resource
+        extract_pattern: '(?:脆弱)?树脂\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: fragile_resin_cnt
+        price_anchor: none
+        weight_v0: 0.2
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_resource_fuel
+        keyword: 燃料
+        keyword_type: resource
+        extract_pattern: '燃料\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: fuel_cnt
+        price_anchor: none
+        weight_v0: 0.2
+        weight_v1: null
+        weight_v2: null
+        source: 查证                 # §4.A0 货币槽位含燃料
+        enabled: true
+        updated_at: '2026-10-02'
+
+      # ------- floor 地板（§4.A0 五游戏共享 floor 词，强制分域不混算）-------
+      - keyword_id: ys_floor_initial
+        keyword: 初始号
+        keyword_type: floor
+        extract_pattern: '(初始号)'
+        feature_map: floor_initial_account_flag
+        price_anchor: floor
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_floor_selfdraw
+        keyword: 自抽号
+        keyword_type: floor
+        extract_pattern: '(自抽号)'
+        feature_map: floor_self_drawn_flag
+        price_anchor: floor
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_floor_empty
+        keyword: 空号
+        keyword_type: floor
+        extract_pattern: '(空号)'
+        feature_map: floor_empty_account_flag
+        price_anchor: floor
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_floor_deadmail
+        keyword: 死邮
+        keyword_type: floor
+        extract_pattern: '(死邮|邮箱不出售|不出邮)'
+        feature_map: floor_dead_mail_flag
+        price_anchor: floor
+        weight_v0: 0.6                   # F5 安全折价：死邮 ×0.6–0.8（docs/02 §5）
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_floor_unverified
+        keyword: 未实名
+        keyword_type: floor
+        extract_pattern: '(未实名)'
+        feature_map: floor_unverified_flag
+        price_anchor: floor
+        weight_v0: 0.4
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-02'
+      - keyword_id: ys_floor_channel_server
+        keyword: 渠道服
+        keyword_type: floor
+        extract_pattern: '(渠道服)'
+        feature_map: floor_channel_server_flag
+        price_anchor: floor
+        weight_v0: 0.6                   # 渠道服 ×0.3–0.4，强制分域（docs/02 §5/§6）
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+
+      # ---------------- risk 折价（§4.A1 risk 1 组）----------------
+      - keyword_id: ys_risk_intl_server
+        keyword: 国际服
+        keyword_type: risk
+        extract_pattern: '(国际服)'
+        feature_map: server_domain_risk
+        price_anchor: none               # 分域不混算；不作为价格锚点
+        weight_v0: 0.5
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-02'
+
+  # ======================================================================== #
+  # 鸣潮（10302）画像 wuwa_v0 —— 2026-10-03 站内实样校准（docs/02 §4.A4）
+  # 25 条：ceiling 7 / segment 10 / resource 5 / floor 3
+  # ======================================================================== #
+  - profile_id: wuwa_10302
+    game_id: 10302
+    game_name: 鸣潮
+    keyword_profile: wuwa_v0          # 与 dim_game.keyword_profile 对齐（pxb7/db.py:92）
+    source: 站内实样校准（MVNGK0804，2026-10-03）+ docs/02 §4.A0/§4.A4 + docs/03 §1.4
+    keywords:
+      # ---------------- ceiling 天花板（§4.A4 ceiling 行）----------------
+      # [wuwa_ceiling_manlian] confidence=medium（文档支撑词，样文未出现——样文用「N命」）
+      # docs/02 §4.A0「0+1 / 6链/满链」+ §4.A4「限定共鸣者满链（6链）」；docs/03 §1.4「6+1 满链热门 220–320」
+      - keyword_id: wuwa_ceiling_manlian
+        keyword: 满链
+        keyword_type: ceiling
+        extract_pattern: '(满链|6\s*链|六\s*链)'
+        feature_map: constellation_cnt
+        price_anchor: ceiling
+        weight_v0: null                  # 待标定（分析师未给价格重要性先验）
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_zhuanwu] confidence=medium（文档支撑词，样文未出现）
+      # docs/02 §4.A0 鸣潮专武槽位「专属武器/谐振」+ §4.A4「专属武器高谐振」
+      - keyword_id: wuwa_ceiling_zhuanwu
+        keyword: 专武
+        keyword_type: ceiling
+        extract_pattern: '(专武|专属武器)'
+        feature_map: signature_weapon_flag
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_xiezhen] confidence=medium（文档支撑词）——名字命中不证明等级，v0 不进锚点层
+      # docs/02 §4.A0（鸣潮武器升格槽位=谐振）+ §4.A4「专属武器高谐振」
+      - keyword_id: wuwa_ceiling_xiezhen
+        keyword: 谐振
+        keyword_type: ceiling
+        extract_pattern: '(谐振)'
+        feature_map: resonance_refine_flag
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_gaoxiezhen] confidence=medium（文档词 + §4.A1 原神「精五/满精」同构先验；样文未出现，样文全部精1）
+      # docs/02 §4.A4「专属武器高谐振」；满精/精5/谐振5 才进锚点层，精1–4 只记 five_star_weapon_refined 计数
+      - keyword_id: wuwa_ceiling_gaoxiezhen
+        keyword: 高谐振
+        keyword_type: ceiling
+        extract_pattern: '(高谐振|满精|精\s*[5五]|谐振\s*[5五])'
+        feature_map: five_star_weapon_refined
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_t0_kateixiya] confidence=high（样文 + 文档双证）
+      # 样文五星角色段含「卡提希娅」；docs/02 §4.A4 T0 梯队；docs/03 §0 规律8/§1.4「溢价向 T0 梯队集中」
+      - keyword_id: wuwa_ceiling_t0_kateixiya
+        keyword: 卡提希娅
+        keyword_type: ceiling
+        extract_pattern: '(卡提希娅)'
+        feature_map: t0_kateixiya_flag
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_t0_fuluoluo] confidence=high（样文『3命弗洛洛』（五星段首位）+ docs/02 §4.A4/§1.4 T0 梯队）
+      - keyword_id: wuwa_ceiling_t0_fuluoluo
+        keyword: 弗洛洛
+        keyword_type: ceiling
+        extract_pattern: '(弗洛洛)'
+        feature_map: t0_fuluoluo_flag
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_ceiling_shenghai] confidence=medium（文档支撑词；样文零声骸字样 → 待实测）
+      # docs/02 §4.A0 装备槽位「声骸/词条毕业」+ §4.A4 ceiling「声骸词条毕业」
+      - keyword_id: wuwa_ceiling_shenghai
+        keyword: 声骸毕业
+        keyword_type: ceiling
+        extract_pattern: '(声骸毕业|声骸词条毕业|毕业声骸)'
+        feature_map: echo_graduation_flag
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+
+      # ------- segment / 记法（非锚点，只产计数；docs/02 §4.A4 的 structure 行）-------
+      # [wuwa_seg_nming] confidence=high（样文『19个五星角色：3命弗洛洛, 2命安可, 1命鉴心』）
+      # docs/02 §4.A0/§4.A4 只写「0+1/满链」→ 样文与文档冲突，以样文为准
+      # 行序有意排在「满命」之前：同名 feature 首次命中优先（pxb7/extract.py:345-347）按种子行序，
+      # 数字记法更具体 → 样文 constellation_cnt=3（五星段），不被四星段「满命」覆盖为 6；两者都不进锚点层
+      - keyword_id: wuwa_seg_nming
+        keyword: N命
+        keyword_type: segment
+        extract_pattern: '((?:[1-6])\s*命)'
+        feature_map: constellation_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_manming] confidence=high（样文：12 个四星角色中 11 个标「满命」）
+      # 四星满命 ≠ 天花板 → 不计锚点；只写 constellation_cnt（满→6），避免 §6 天花板域被四星满命大面积误触发
+      - keyword_id: wuwa_seg_manming
+        keyword: 满命
+        keyword_type: segment
+        extract_pattern: '(满命)'
+        feature_map: constellation_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_jingn] confidence=high（样文『15个五星武器：精1星序协响, 精1千古洑流, …』15 条全为精1）
+      # 精1 不是溢价项 → price_anchor=none；精5/满精由 wuwa_ceiling_gaoxiezhen 承担锚点
+      - keyword_id: wuwa_seg_jingn
+        keyword: 精N
+        keyword_type: segment
+        extract_pattern: '精\s*([1-5])'
+        feature_map: five_star_weapon_refined
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_level] confidence=high（样文『80级』；docs/01 §2 卡片字段实测含「等级」，鸣潮卡片是否同构待实测）
+      # 正则加固（2026-10-03）：标签式在前、数字式兜底 —— 对齐 pxb7/parser.py:114-116 的 L2/L3 分层
+      - keyword_id: wuwa_seg_level
+        keyword: 等级
+        keyword_type: segment
+        extract_pattern: '((?:等级|冒险等级)\s*[:：]?\s*\d{1,3}|\d{1,3}\s*级)'
+        feature_map: account_level_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_yellow] confidence=high（样文『40黄』；pxb7/parser.py:118-121 同源正则；docs/01 §2 卡片字段「黄数」）
+      # 正则加固：`黄(?!数)` 防「等级60 黄数45」被数字式误读成 60（2026-10-03 实测复现的假阳性）
+      - keyword_id: wuwa_seg_yellow
+        keyword: N黄
+        keyword_type: segment
+        extract_pattern: '(黄数\s*[:：]?\s*\d{1,4}|\d{1,4}\s*黄(?!数))'
+        feature_map: yellow_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_five_star_chars] confidence=high（样文『19个五星角色』；pxb7/parser.py:127-131 同源正则）
+      # 正则加固：标签式在前；数字式加 `(?!\s*\d)` 防「五星角色 12 五星武器 5」串号
+      - keyword_id: wuwa_seg_five_star_chars
+        keyword: N个五星角色
+        keyword_type: segment
+        extract_pattern: '(五星角色\s*[:：]?\s*\d{1,3}(?!\s*个\s*(?:五星|四星))|\d{1,3}\s*个?\s*五星角色(?!\s*\d))'
+        feature_map: five_star_chars_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_five_star_weapons] confidence=high（样文『15个五星武器』——按条目计，含千古洑流/永远的启明星各 2 次，去重 13 件；pxb7/parser.py:133-137 同源正则）
+      # 正则加固：同上（标签式在前 + 数字式 `(?!\s*\d)`）
+      - keyword_id: wuwa_seg_five_star_weapons
+        keyword: N个五星武器
+        keyword_type: segment
+        extract_pattern: '(五星武器\s*[:：]?\s*\d{1,3}(?!\s*个\s*(?:五星|四星))|\d{1,3}\s*个?\s*五星武器(?!\s*\d))'
+        feature_map: five_star_weapons_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_four_star_chars] confidence=high（样文『12个四星角色』）
+      # pxb7/parser.py CONTRACT_FIELDS 无四星字段 → 样文新增结构槽位，必须 [抽]
+      - keyword_id: wuwa_seg_four_star_chars
+        keyword: N个四星角色
+        keyword_type: segment
+        extract_pattern: '(\d{1,3})\s*个?\s*四星角色'
+        feature_map: four_star_chars_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_vehicle_frame] confidence=high（样文『车架模组：云帛机骑』）——文档零覆盖，价值档位未知，不进锚点层
+      - keyword_id: wuwa_seg_vehicle_frame
+        keyword: 车架模组
+        keyword_type: segment
+        extract_pattern: '(车架模组)'
+        feature_map: vehicle_frame_module_flag
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_seg_moto_ornament] confidence=high（样文『摩托饰品：绯雪团子』）——文档零覆盖，价值档位未知，不进锚点层
+      - keyword_id: wuwa_seg_moto_ornament
+        keyword: 摩托饰品
+        keyword_type: segment
+        extract_pattern: '(摩托饰品)'
+        feature_map: motorcycle_ornament_flag
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+
+      # ---------------- resource 资源（§4.A4；样文「名：数」全角冒号）----------------
+      # [wuwa_resource_xingsheng] confidence=high（样文『星声：942』）+ docs/02 §4.A0 货币槽位 + docs/03 §1.4 星声×0.7 折算（待校准）
+      - keyword_id: wuwa_resource_xingsheng
+        keyword: 星声
+        keyword_type: resource
+        extract_pattern: '星声\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: astrite_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_resource_yuexiang] confidence=high（样文『月相：3』）——充值直购货币，折算待校准；样文新增字段
+      - keyword_id: wuwa_resource_yuexiang
+        keyword: 月相
+        keyword_type: resource
+        extract_pattern: '月相\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: lunite_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_resource_yuboshanhu] confidence=high（样文『余波珊瑚：62』）——文档未收录，样文新增字段
+      - keyword_id: wuwa_resource_yuboshanhu
+        keyword: 余波珊瑚
+        keyword_type: resource
+        extract_pattern: '余波珊瑚\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: afterglow_coral_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_resource_fujinbowen] confidence=high（样文『浮金波纹：11』）——docs/02 §4.A0「星声/唤取资源」（唤取资源即波纹类）
+      - keyword_id: wuwa_resource_fujinbowen
+        keyword: 浮金波纹
+        keyword_type: resource
+        extract_pattern: '浮金波纹\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: lustrous_tide_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_resource_zhuchaobowen] confidence=high（样文『铸潮波纹：1』）——与武器池同族写法字形极近（「潮/涛」），家族式容错待实测
+      - keyword_id: wuwa_resource_zhuchaobowen
+        keyword: 铸潮波纹
+        keyword_type: resource
+        extract_pattern: '铸潮波纹\s*[:：]?\s*(\d[\d,]*)'
+        feature_map: radiant_tide_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 实测
+        enabled: true
+        updated_at: '2026-10-03'
+
+      # ---------------- floor 地板（§4.A0 五游戏共享 floor 词，强制分域不混算）----------------
+      # [wuwa_floor_channel] confidence=medium（文档支撑；样文未出现，本地也无渠道服样本）
+      # docs/02 §4.A0 共享 floor 词「渠道服/国际服（强制分域）」+ §4.A4「渠道服分域」+ §5 渠道服 ×0.3–0.4
+      - keyword_id: wuwa_floor_channel
+        keyword: 渠道服
+        keyword_type: floor
+        extract_pattern: '(渠道服)'
+        feature_map: floor_channel_server_flag
+        price_anchor: floor
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_floor_initial] confidence=medium（文档支撑；docs/03 §1.4 官方赠送慷慨→自抽期望成本低）
+      - keyword_id: wuwa_floor_initial
+        keyword: 初始号
+        keyword_type: floor
+        extract_pattern: '(初始号|自抽号)'
+        feature_map: floor_initial_account_flag
+        price_anchor: floor
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+      # [wuwa_floor_deadmail] confidence=medium（文档支撑；§5 折价系数表「死邮/邮箱不出售 ×0.6–0.8」）
+      - keyword_id: wuwa_floor_deadmail
+        keyword: 死邮
+        keyword_type: floor
+        extract_pattern: '(死邮|邮箱不出售|不出邮)'
+        feature_map: floor_dead_mail_flag
+        price_anchor: floor
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'

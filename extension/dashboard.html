@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pxb7 采集看板 · 前端 B</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212b; --line: #2a2f3c;
+    --text: #e6e9f0; --muted: #8b93a7; --green: #34d399; --red: #f87171;
+    --amber: #fbbf24; --blue: #60a5fa; --accent: #7c9eff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 20px; margin: 0; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green);
+         box-shadow: 0 0 8px var(--green); display: inline-block; }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .pill { border: 1px solid var(--line); background: var(--panel); border-radius: 999px;
+          padding: 3px 12px; font-size: 12px; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+          padding: 14px 16px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 24px; font-weight: 650; margin-top: 2px; }
+  .card .s { color: var(--muted); font-size: 11px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+            padding: 16px; margin-bottom: 16px; }
+  section h2 { font-size: 14px; margin: 0 0 10px; color: var(--accent); font-weight: 650; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px;
+       border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  tr:last-child td { border-bottom: none; }
+  .num { font-variant-numeric: tabular-nums; }
+  .bar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .bar-label { width: 120px; color: var(--muted); font-size: 12px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { flex: 1; background: var(--panel2); border-radius: 6px; height: 16px; }
+  .bar-fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, #2f6feb, #7c9eff);
+              min-width: 2px; }
+  .bar-num { width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
+  label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  input[type=number], input[type=text] { background: var(--panel2); border: 1px solid var(--line);
+      color: var(--text); border-radius: 8px; padding: 6px 10px; width: 130px; }
+  button { background: var(--accent); border: none; color: #0d1220; font-weight: 650;
+           border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  .ok-note { color: var(--green); font-size: 12px; margin-left: 10px; }
+  .warn-note { color: var(--amber); font-size: 12px; }
+  code { background: var(--panel2); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
+  a { color: var(--blue); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+  @media (max-width: 640px) { .two { grid-template-columns: 1fr; } }
+  .targets label { margin: 6px 0; }
+  .targets .cnt { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .targets .mode { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .paths td code { word-break: break-all; }
+  .paths .badge { color: var(--amber); font-size: 11px; margin-left: 6px; }
+  .paths .ro { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .mini { padding: 2px 10px; font-size: 12px; }
+  .mini.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  .paths-form input[type=text] { width: 100%; }
+  .paths-form label { flex-direction: column; align-items: flex-start; gap: 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🦀 pxb7 采集看板</h1>
+    <span class="pill" id="task-pill">任务 …</span>
+    <span class="pill" id="channel-pill">通道：前端 B 插件 · 只读当前页面</span>
+    <span class="pill" id="script-pill">用户脚本 …</span>
+    <span class="pill" id="ext-pill">扩展 …</span>
+    <button class="ghost" id="upd" style="display:none;padding:4px 12px;font-size:12px">
+      一键更新插件</button>
+    <span style="flex:1"></span>
+    <span class="muted"><span class="dot" id="live-dot"></span> 自动刷新 5s
+      <label style="display:inline;margin-left:8px"><input type="checkbox" id="auto" checked> 开</label></span>
+  </header>
+
+  <div class="grid" id="tiles"></div>
+
+  <div class="cols">
+    <section>
+      <h2>最近批次（实时）</h2>
+      <table id="batches"><thead><tr>
+        <th>时间</th><th>类型</th><th>明细</th><th>结果</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+    <section>
+      <h2>采集轮次（最近 14 轮）</h2>
+      <div id="rounds"></div>
+    </section>
+  </div>
+
+  <div class="cols">
+    <section>
+      <h2>价格分布（¥0–2000，10 桶）</h2>
+      <div id="hist"></div>
+    </section>
+    <section>
+      <h2>词表命中 Top 10</h2>
+      <div id="keywords"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>最新入库数据（15 条）</h2>
+    <table id="listings"><thead><tr>
+      <th>listing_id</th><th>任务</th><th>轮次</th><th>价格 ¥</th><th>等级</th><th>黄数</th>
+      <th>区服</th><th>邮箱</th><th>浏览</th><th>收藏</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>采集目标（只采集勾选的游戏；未勾选 = 使用网关启动任务）</h2>
+      <div id="targets" class="targets"></div>
+      <div style="margin-top:8px">
+        <button class="ghost mini" id="targets-all">全选已启用</button>
+        <span id="targets-note" class="ok-note"></span>
+      </div>
+      <p class="muted" style="margin:8px 0 0">
+        勾选即保存（脚本 ≤5 分钟或刷新页面生效）；未勾选的游戏页面会被网关拒收
+        （<code>target-not-selected</code>），不落任何数据。</p>
+    </section>
+    <section>
+      <h2>数据存放位置（本机绝对路径）</h2>
+      <table id="paths" class="paths"><thead><tr>
+        <th>用途</th><th>路径</th><th></th>
+      </tr></thead><tbody></tbody></table>
+      <p class="muted" style="margin:8px 0 0">
+        采集产物 = 数据库 + 原始页面 DOM（bronze）+ 轮次 summary + 日志；
+        登录态/风控状态目录不随数据路径迁移（安全相关）。</p>
+    </section>
+  </div>
+
+  <section class="paths-form">
+    <h2>自定义数据路径（写 config/paths_override.json；看板与 CLI 同时生效）</h2>
+    <div class="two">
+      <label>数据根目录（「按根目录填充」自动推导下方四项）
+        <input type="text" id="p-root" placeholder="如 D:\pxb7-data"></label>
+      <label>数据库文件（db，.duckdb）
+        <input type="text" id="p-db"></label>
+      <label>原始页面 DOM（raw_root）
+        <input type="text" id="p-raw_root"></label>
+      <label>轮次 summary（runs）
+        <input type="text" id="p-runs"></label>
+      <label>日志（log_dir）
+        <input type="text" id="p-log_dir"></label>
+    </div>
+    <div style="margin-top:10px">
+      <button class="ghost" id="p-fill-root">按根目录填充</button>
+      <button id="p-apply">应用路径</button>
+      <button class="ghost" id="p-reset">恢复默认</button>
+      <span id="p-note" class="ok-note"></span>
+    </div>
+    <p class="muted" style="margin:8px 0 0">
+      必须填写绝对路径；应用后自动建目录、必要时初始化新库，<b>查看历史数据请把 DB 指向已有文件</b>。
+      CLI 等价命令：<code>run.py paths --set db=… --set raw_root=…</code>（<code>--reset</code> 恢复默认）。</p>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>插件设置（脚本自动应用：≤5 分钟或页面刷新生效）</h2>
+      <label><input type="checkbox" id="c-auto"> 自动采集（浏览到列表/详情页时入库）</label>
+      <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
+      <label>每次采集张数<input type="number" id="c-cards" min="16" max="200" step="16"></label>
+      <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
+      <label><input type="checkbox" id="c-debug"> 调试日志（控制台）</label>
+      <p class="muted" style="margin:2px 0 0">
+        站点一页只在 DOM 里渲染 16 张卡片（四个游戏实测一致）；把「每次采集张数」调大后，
+        脚本会在页面内滚动触发站点自身的加载更多（每 2 秒一轮，连续两轮无新增即停），
+        然后把整页 DOM 一次性入库（幂等合并，不产生重复行）。</p>
+      <div style="margin-top:10px">
+        <button id="save">保存设置</button>
+        <button class="ghost" id="reset">恢复默认</button>
+        <span id="cfg-note" class="ok-note"></span>
+      </div>
+      <p class="muted" style="margin-bottom:0">
+        网关地址固定为 <code id="gw-url"></code>；改动网关地址需同步修改用户脚本头部的
+        <code>GATEWAY</code> 常量。</p>
+    </section>
+    <section>
+      <h2>安装 / 状态</h2>
+      <ol style="margin:0 0 10px 18px; padding:0">
+        <li>启动网关：<code>run.py serve</code>（分离后台服务，随本软件自动启动）</li>
+        <li>浏览器插件二选一（可同时在 Edge/Chrome/夸克 里各装一份）：
+          <b>独立扩展</b>——双击「安装浏览器扩展.bat」按引导在每个浏览器加载
+          <code>pxb7-extension</code> 目录（v0.3.0 起扩展自动更新，无需再手动重载）；
+          <b>或</b> Tampermonkey 用户脚本——<a href="/userscript.js">点此安装/更新</a>
+          （按 @updateURL 自动检查更新）</li>
+        <li>像平常一样浏览 pxb7 的 <code>/buy/*</code> 与 <code>/product/*</code> 页面：
+            右下角出现「pxb7采集」角标即在工作；<b>扩展为工具栏图标弹窗看板</b>，
+            油猴版为左下角 📊 按钮面板（采集与状态一体）</li>
+      </ol>
+      <div style="margin-bottom:10px">
+        <button class="ghost" id="stopgw" style="font-size:12px">停止后台服务</button>
+        <span id="stop-note" class="muted" style="margin-left:8px"></span>
+      </div>
+      <div id="risk"></div>
+      <p class="muted" style="margin-bottom:0">
+        通道说明：插件只读取你正在浏览的页面（「每次采集张数」调大时在本页内触发站点自身的
+        加载更多，等同手动滚动；不猜 URL、不请求站外接口），不受 Playwright 风控退避影响；
+        拦截页拒收不入库；插件通道覆盖不完整，下架推断固定关闭。</p>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "—").replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString("zh-CN");
+
+function tile(k, v, s) {
+  return `<div class="card"><div class="k">${k}</div><div class="v">${v}</div>` +
+         (s ? `<div class="s">${s}</div>` : "") + `</div>`;
+}
+function bars(rows, labelFn, valueFn, max) {
+  const top = max !== undefined ? max : Math.max(1, ...rows.map(valueFn));
+  return rows.map(r => {
+    const v = valueFn(r);
+    return `<div class="bar-row"><div class="bar-label" title="${esc(labelFn(r))}">` +
+           `${esc(labelFn(r))}</div><div class="bar-track">` +
+           `<div class="bar-fill" style="width:${(v / top) * 100}%"></div></div>` +
+           `<div class="bar-num">${fmt(v)}</div></div>`;
+  }).join("") || '<div class="muted">暂无数据——去 pxb7 逛一圈就会有了</div>';
+}
+
+function render(s) {
+  $("task-pill").textContent = `任务 ${s.task.task_id}（${s.task.name}）`;
+  $("script-pill").textContent = `插件批次 ${s.stats.batches} · 最近 ${s.stats.last_batch_at ?? "—"}`;
+  const sc = s.script || {};
+  const upd = $("upd");
+  if (sc.update_available) {
+    $("script-pill").textContent =
+      `用户脚本 v${sc.installed_version} → 最新 v${sc.latest_version}（建议更新）`;
+    $("script-pill").style.color = "var(--amber)";
+    upd.style.display = "inline-block";
+  } else {
+    $("script-pill").textContent = sc.installed_version
+      ? `用户脚本 v${sc.installed_version}（最新）`
+      : (sc.latest_version ? `用户脚本 最新 v${sc.latest_version}（尚未收到上报）` : "用户脚本 未检测到");
+    $("script-pill").style.color = "";
+    upd.style.display = "none";
+  }
+  // 扩展通道独立显示（v0.3.0+ 自更新：按磁盘代码自动重载，首次仍需手动加载一次）
+  const ext = sc.extension || {};
+  if (ext.update_available) {
+    $("ext-pill").textContent =
+      `扩展 v${ext.installed_version} → 最新 v${ext.latest_version}（将自动重载；也可运行 更新浏览器扩展.bat）`;
+    $("ext-pill").style.color = "var(--amber)";
+  } else {
+    $("ext-pill").textContent = ext.installed_version
+      ? `扩展 v${ext.installed_version}（最新）`
+      : (ext.latest_version ? `扩展 最新 v${ext.latest_version}（尚未收到上报）` : "扩展 未检测到");
+    $("ext-pill").style.color = "";
+  }
+  const st = s.stats;
+  const rate = st.cards_seen ? (st.cards_parsed / st.cards_seen * 100).toFixed(0) + "%" : "—";
+  $("tiles").innerHTML = [
+    tile("快照总量", fmt(s.db.snapshot_rows ?? "—"), `在售 listing ${fmt(s.db.listings)}`),
+    tile("累计解析", `${fmt(st.cards_parsed)}/${fmt(st.cards_seen)}`,
+         st.cards_seen ? `解析率 ${rate}` : "等待第一批"),
+    tile("新增 listing", fmt(st.new_listings), "插件通道累计"),
+    tile("词表命中", fmt(s.db.keyword_hits ?? "—"), "fct_listing_keyword 行"),
+    tile("详情页回填", fmt(st.details_stored), `待合并 ${s.pending_details}`),
+    tile("拦截页拒收", fmt(st.risk_pages_rejected), "不入库（防线）"),
+  ].join("");
+
+  $("batches").querySelector("tbody").innerHTML = (s.recent_batches || []).slice().reverse()
+    .map(b => {
+      const detail = b.kind === "cards"
+        ? `卡片 ${b.cards_seen} 张`
+        : `详情 ${b.listing_id}`;
+      const res = b.kind === "cards"
+        ? `入库 ${b.snapshots}（新 ${b.new_listings}，解析率 ${(b.parse_success_rate * 100).toFixed(0)}%）`
+        : `回填 ${b.rows_updated} 行（浏览 ${b.viewers_masked ?? "—"}，收藏 ${b.favorites_cnt ?? "—"}）`;
+      return `<tr><td class="num">${esc(b.at)}</td><td>${b.kind === "cards" ? "列表" : "详情"}` +
+             `</td><td>${esc(detail)}</td><td class="num">${esc(res)}</td></tr>`;
+    }).join("") || '<tr><td colspan="4" class="muted">暂无批次——安装用户脚本后浏览 pxb7 即产生</td></tr>';
+
+  $("rounds").innerHTML = bars((s.db.rounds || []).slice().reverse(),
+    r => r.round, r => r.rows);
+  $("hist").innerHTML = bars(s.db.price_histogram || [],
+    r => `¥${r.bucket}–${r.bucket + 200}`, r => r.count);
+  $("keywords").innerHTML = bars(s.db.top_keywords || [],
+    r => r.keyword, r => r.hits);
+
+  $("listings").querySelector("tbody").innerHTML = (s.db.latest_listings || [])
+    .map(r => `<tr><td class="num">${esc(r.listing_id)}</td>` +
+      `<td>${esc(r.game_name ? r.game_name : (r.game_id ?? "—"))}</td>` +
+      `<td class="num">${esc(r.round)}</td>` +
+      `<td class="num">${fmt(r.price)}</td><td class="num">${fmt(r.level)}</td>` +
+      `<td class="num">${fmt(r.yellow_cnt)}</td><td>${esc(r.server)}</td>` +
+      `<td>${esc(r.mail_status)}</td><td class="num">${fmt(r.viewers)}</td>` +
+      `<td class="num">${fmt(r.favorites)}</td></tr>`).join("") ||
+      '<tr><td colspan="10" class="muted">暂无数据</td></tr>';
+
+  if (s.targets) renderTargets(s.targets);
+  if (s.paths) renderPaths(s.paths);
+
+  const rk = s.risk || {};
+  const tasks = Object.entries(rk.tasks || {});
+  $("risk").innerHTML = `<div class="muted">管线通道（Playwright，当前不可用）风控状态：` +
+    `全局停采=${rk.global_stop ? "是" : "否"}${tasks.length ? "" : "；无任务档位记录"}</div>` +
+    tasks.map(([tid, e]) => `<div>· ${esc(tid)}：<b>${esc(e.level)}</b>` +
+      `（${esc(e.reason ?? "—")}）` +
+      (e.backoff_until ? `退避至 ${esc(e.backoff_until)}` : "") + `</div>`).join("");
+}
+
+// ---------- 采集目标（多选：只采集勾选的游戏） ----------
+let targetsSig = "";
+function renderTargets(t) {
+  const sig = JSON.stringify(t);
+  if (sig === targetsSig) return;              // 自动刷新不重绘，避免打断勾选
+  targetsSig = sig;
+  $("targets").innerHTML = (t.available || []).map(x =>
+    `<label><input type="checkbox" data-task="${esc(x.task_id)}"${x.selected ? " checked" : ""}` +
+    `${x.enabled ? "" : " disabled"}> ${esc(x.name)} ` +
+    `<span class="muted">#${esc(x.game_id)}</span>` +
+    `<span class="cnt">快照 ${fmt(x.snapshots)} · listing ${fmt(x.listings)}` +
+    `${x.latest_round ? " · 最近 " + esc(x.latest_round) : ""}</span></label>`).join("") ||
+    '<div class="muted">无可用任务（检查 config/tasks.yaml）</div>';
+  $("targets").insertAdjacentHTML("beforeend",
+    `<div class="mode">${t.mode === "selected"
+      ? `已选 ${(t.effective || []).length} 个目标：${esc((t.effective || []).join("、"))}`
+      : `未勾选 → 使用网关启动任务（${esc(t.default_task || "—")}）`}</div>`);
+  $("targets").querySelectorAll("input[data-task]").forEach(el =>
+    el.addEventListener("change", () => saveTargets()));
+}
+async function saveTargets(ids) {
+  const list = ids || Array.from($("targets").querySelectorAll("input[data-task]:checked"))
+    .map(el => el.dataset.task);
+  const r = await (await fetch("/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targets: list }),      // 部分更新：其余配置项保持不变
+  })).json();
+  const note = $("targets-note");
+  if (r.ok) { targetsSig = ""; renderTargets(r.targets || {}); note.textContent = "已保存 ✓"; }
+  else { note.textContent = "保存失败：" + r.error; }
+  setTimeout(() => { note.textContent = ""; }, 4000);
+}
+
+// ---------- 数据存放位置（展示 + 打开/复制 + 自定义） ----------
+let pathsDirty = false;
+let pathsSig = "";
+function flashPath(text) {
+  const el = $("p-note");
+  el.textContent = text;
+  setTimeout(() => { el.textContent = ""; }, 5000);
+}
+function fillPathInputs(p) {
+  const get = (k) => ((p.items || []).find(i => i.key === k) || {}).path || "";
+  $("p-db").value = get("db");
+  $("p-raw_root").value = get("raw_root");
+  $("p-runs").value = get("runs");
+  $("p-log_dir").value = get("log_dir");
+}
+function renderPaths(p) {
+  const sig = JSON.stringify(p);
+  if (sig !== pathsSig) {                  // 自动刷新不重绘，避免打断点击/复制
+    pathsSig = sig;
+    $("paths").querySelector("tbody").innerHTML = (p.items || []).map(it =>
+      `<tr><td>${esc(it.label)}${it.customized
+          ? '<span class="badge">已自定义</span>'
+          : (it.overridable ? "" : '<span class="ro">只读</span>')}</td>` +
+      `<td><code>${esc(it.path)}</code></td>` +
+      `<td style="white-space:nowrap">` +
+      `<button class="mini ghost" data-copy="${esc(it.path)}">复制</button> ` +
+      `<button class="mini ghost" data-open="${esc(it.key)}">打开</button></td></tr>`).join("");
+    $("paths").querySelectorAll("button[data-copy]").forEach(el =>
+      el.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(el.dataset.copy); flashPath("已复制路径 ✓"); }
+        catch (e) { flashPath("复制失败，请手动选择路径文本"); }
+      }));
+    $("paths").querySelectorAll("button[data-open]").forEach(el =>
+      el.addEventListener("click", async () => {
+        const r = await (await fetch("/open-folder", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: el.dataset.open }),
+        })).json();
+        if (!r.ok) flashPath("打开失败：" + r.error);
+      }));
+  }
+  if (!pathsDirty) fillPathInputs(p);            // 用户编辑中不覆盖输入框
+}
+async function savePaths(payload, okText) {
+  const r = await (await fetch("/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths: payload }),
+  })).json();
+  if (r.ok) { pathsDirty = false; flashPath(okText || "路径已应用 ✓"); await refresh(); }
+  else { flashPath("应用失败：" + r.error); }
+}
+
+function fillConfig(c) {
+  $("c-auto").checked = !!c.auto_ingest;
+  $("c-interval").value = c.reingest_interval_min;
+  $("c-cards").value = c.cards_target || 16;
+  $("c-settle").value = c.spa_settle_ms;
+  $("c-debug").checked = !!c.debug;
+}
+
+async function loadConfig() {
+  const r = await (await fetch("/config")).json();
+  if (r.ok) fillConfig(r.config);
+}
+
+async function saveConfig(payload) {
+  const r = await (await fetch("/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })).json();
+  const note = $("cfg-note");
+  if (r.ok) { fillConfig(r.config); note.textContent = "已保存 ✓"; }
+  else { note.textContent = ""; alert("保存失败：" + r.error); }
+  setTimeout(() => note.textContent = "", 4000);
+}
+
+$("save").addEventListener("click", () => saveConfig({
+  auto_ingest: $("c-auto").checked,
+  reingest_interval_min: Number($("c-interval").value),
+  cards_target: Number($("c-cards").value),
+  spa_settle_ms: Number($("c-settle").value),
+  debug: $("c-debug").checked,
+}));
+$("reset").addEventListener("click", () => saveConfig({
+  auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
+  spa_settle_ms: 2500, debug: false }));
+
+$("targets-all").addEventListener("click", () => {
+  const ids = Array.from($("targets").querySelectorAll("input[data-task]:not(:disabled)"))
+    .map(el => el.dataset.task);
+  saveTargets(ids);
+});
+["p-db", "p-raw_root", "p-runs", "p-log_dir"].forEach(id =>
+  $(id).addEventListener("input", () => { pathsDirty = true; }));
+$("p-fill-root").addEventListener("click", () => {
+  const root = ($("p-root").value || "").trim().replace(/[\\/]+$/, "");
+  if (!root) { flashPath("先填数据根目录，如 D:\\pxb7-data"); return; }
+  const sep = root.includes("\\") ? "\\" : "/";
+  $("p-db").value = `${root}${sep}pxb7.duckdb`;
+  $("p-raw_root").value = `${root}${sep}raw${sep}pxb7`;
+  $("p-runs").value = `${root}${sep}runs`;
+  $("p-log_dir").value = `${root}${sep}logs`;
+  pathsDirty = true;
+  flashPath("已按根目录填充，点「应用路径」保存");
+});
+$("p-apply").addEventListener("click", () => {
+  const payload = {
+    db: $("p-db").value.trim(), raw_root: $("p-raw_root").value.trim(),
+    runs: $("p-runs").value.trim(), log_dir: $("p-log_dir").value.trim(),
+  };
+  for (const key of Object.keys(payload)) {
+    if (!payload[key]) { flashPath(`请填写 ${key}（必须为绝对路径）`); return; }
+  }
+  savePaths(payload, "路径已应用（新库缺失时已自动初始化）✓");
+});
+$("p-reset").addEventListener("click", () => savePaths({}, "已恢复默认路径 ✓"));
+$("upd").addEventListener("click", () => window.open("/userscript.js", "_blank"));
+$("stopgw").addEventListener("click", async () => {
+  const note = $("stop-note");
+  note.textContent = "正在停止…";
+  try {
+    const r = await (await fetch("/shutdown", { method: "POST" })).json();
+    note.textContent = r.ok ? "服务已停止；再次使用请双击桌面「pxb7采集看板」"
+                            : "停止失败：" + (r.error || r.note);
+    $("live-dot").className = "dot bad";
+  } catch (e) {
+    note.textContent = "服务已停止（连接断开）";
+    $("live-dot").className = "dot bad";
+  }
+});
+
+let timer = null;
+async function refresh() {
+  try {
+    const s = await (await fetch("/stats")).json();
+    render(s);
+    $("live-dot").className = "dot";
+  } catch (e) {
+    $("live-dot").className = "dot bad";
+  }
+}
+$("auto").addEventListener("change", (e) => {
+  if (timer) clearInterval(timer);
+  if (e.target.checked) timer = setInterval(refresh, 5000);
+});
+timer = setInterval(refresh, 5000);
+$("gw-url").textContent = location.origin;
+refresh();
+loadConfig();
+</script>
+</body>
+</html>

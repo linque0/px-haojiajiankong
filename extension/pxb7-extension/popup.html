@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>pxb7 采集看板</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <span class="logo">🦀</span>
+  <b>pxb7 采集看板</b>
+  <span id="state" class="state">连接中…</span>
+  <span id="ver" class="ver"></span>
+</header>
+
+<section id="tiles" class="tiles"></section>
+
+<div class="cap">采集轮次（最近 5 轮）</div>
+<section id="rounds" class="bars"></section>
+
+<div class="cap">最近批次</div>
+<section id="batches" class="batches"></section>
+
+<div class="cap">采集目标（勾选要采集的游戏）</div>
+<section id="targets" class="targets"></section>
+
+<div class="cap">设置（脚本自动应用）</div>
+<section class="settings">
+  <label><input type="checkbox" id="c-auto"> 自动采集</label>
+  <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
+  <label>每次采集张数 <input type="number" id="c-cards" min="16" max="200" step="16" value="16"></label>
+  <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
+  <label><input type="checkbox" id="c-debug"> 调试日志</label>
+  <div class="muted" style="margin:-2px 0 4px">站点一页渲染 16 张；调大后脚本会在页内滚动加载更多卡片（每 2 秒一轮，连续两轮无新增即停），再一次性入库。</div>
+  <div class="row">
+    <button id="save">保存设置</button>
+    <span id="note" class="note"></span>
+  </div>
+</section>
+
+<div class="cap">数据存放位置（本机）</div>
+<section id="paths" class="paths"></section>
+
+<section class="actions">
+  <button id="grab" class="accent">采集本页</button>
+  <button id="upd-ext" class="ghost" style="display:none" title="按磁盘最新代码重载扩展（Chrome/Edge/夸克通用）">应用扩展更新</button>
+  <button id="full" class="ghost">完整看板</button>
+  <button id="stop" class="ghost">停止服务</button>
+</section>
+<footer>只读取你正在浏览的 pxb7 页面 · 数据仅存本机 · 不请求站外接口<br>
+  扩展 v0.3.0+ 支持自更新：代码更新后自动重载，无需再手动「重新加载」<br>
+  路径自定义请点「完整看板 → 数据存放位置」</footer>
+<script src="popup.js"></script>
+</body>
+</html>

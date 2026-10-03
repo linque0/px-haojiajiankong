@@ -1,0 +1,10 @@
+# pxb7-price-monitor 运行依赖（主版本钉死，见 docs/01 §8 W1）
+# 安装：pxb7-price-monitor/.venv/Scripts/python.exe -m pip install -r pxb7-price-monitor/requirements.txt
+# 安装后另需执行：pxb7-price-monitor/.venv/Scripts/python.exe -m playwright install chromium
+
+playwright>=1.49,<2.0
+duckdb>=1.1,<2.0
+pyyaml>=6.0,<7.0
+pytest>=8.0,<9.0
+# 离线 DOM 解析（解析器从 raw HTML 重放，不依赖浏览器；冒烟后按真实 DOM 校准选择器）
+beautifulsoup4>=4.12,<5.0

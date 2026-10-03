@@ -1,0 +1,50 @@
+# pxb7-price-monitor —— 版本控制忽略清单
+#
+# 红线：登录态文件（data/state/storage_*.json，含站点 Cookie）**绝不入库、不外传**；
+# 采集产物（raw / runs / 日志 / DuckDB）与虚拟环境同理，只保留代码、配置、文档、测试。
+
+# 虚拟环境（本机 Python 3.14.7）
+.venv/
+venv/
+
+# 运行期数据（原始 DOM dump / 登录态 / 风控状态 / 轮次 summary / 日志 / 插件配置）
+data/raw/
+data/state/
+data/runs/
+data/logs/
+data/calibration-*.duckdb
+
+# DuckDB（含 WAL）
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp
+
+# 本机路径自定义（含本地绝对路径，按机器而异）
+config/paths_override.json
+
+# 本地安全钩子状态与对话/工作流草稿
+.mimosa/
+.zcode/
+
+# 备份快照（改前留档）：本地保险，不随仓库分发
+*.bak.md
+*.bak.yaml
+*.bak.py
+
+# Windows 误建文件与编辑器临时文件
+nul
+*.tmp
+*~
+
+# Python 产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+

@@ -1,0 +1,33 @@
+{
+  "url": "https://www.pxb7.com/buy/10026/1",
+  "page_type": "list",
+  "page_no": 1,
+  "task_id": "genshin_official",
+  "run_id": "genshin_official-20261002T225748-2146",
+  "collected_at": "2026-10-02T22:58:08",
+  "http_status": 200,
+  "ok": true,
+  "error": null,
+  "collected_via": "guest",
+  "session_slot": "guest",
+  "storage_state": null,
+  "parser_version": "v0.1.0",
+  "cards_seen": 0,
+  "cards_parsed": 0,
+  "first_card_id": null,
+  "card_wait_selector": null,
+  "card_selector_used": null,
+  "risk_signals": [
+    "captcha"
+  ],
+  "guard": {
+    "requests_seen": 182,
+    "requests_allowed": 182,
+    "requests_blocked": 0,
+    "robots_skipped": 0,
+    "block_reasons": {}
+  },
+  "robots_disallowed_path": false,
+  "pagination_strategy": "url",
+  "pagination_used": "url"
+}

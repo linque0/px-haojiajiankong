@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "pxb7 采集助手（前端 B）",
+  "version": "0.4.0",
+  "description": "在你自己浏览的 pxb7 页面上就地采集已渲染的卡片/详情，发送到本机采集看板（127.0.0.1:8765）入库；可按游戏勾选采集目标、调节每次采集张数（页内加载更多）、查看数据存放路径；支持自更新。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["storage", "tabs", "clipboardWrite", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "pxb7 采集看板",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.pxb7.com/buy/*",
+        "https://www.pxb7.com/product/*"
+      ],
+      "js": ["sweep.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
