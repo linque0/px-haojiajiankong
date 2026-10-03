@@ -1,0 +1,17 @@
+# 换行归一：仓库内一律 LF，检出时按平台/类型决定
+# - .bat/.cmd 必须是 CRLF（cmd.exe 对 LF 批处理的解析有坑）
+# - 其余源码/文档/配置检出为 LF，保证跨机一致
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不做换行与 diff 转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.duckdb binary
+*.zip binary
+
+# GitHub 语言统计：夹具 HTML 不计入源码占比
+tests/fixtures/*.html linguist-documentation
+docs/*.md linguist-documentation
