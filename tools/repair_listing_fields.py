@@ -20,7 +20,9 @@ from pxb7 import config, db, extract as X, gateway as G, parser as P, pipeline a
 FIELDS = ("level", "yellow_cnt", "five_star_chars", "five_star_weapons", "favorites_cnt")
 
 
-def repair(settings, *, apply=False, paid_items_only=False):
+def repair(settings, *, apply=False, paid_items_only=False, character_chains_only=False):
+    if paid_items_only and character_chains_only:
+        raise ValueError('请选择一种修复范围')
     with PL.run_lock(settings):
         conn = db.connect(settings.paths.db, read_only=not apply)
         try:
@@ -43,6 +45,8 @@ def repair(settings, *, apply=False, paid_items_only=False):
                     continue
                 sources.append((dt.datetime.fromisoformat(meta['collected_at']), task, html_path, meta))
             for at, task, html_path, meta in sorted(sources, key=lambda s: (s[0], str(s[2]))):
+                if character_chains_only and task.game_id != 10302:
+                    continue
                 html = html_path.read_text(encoding='utf-8')
                 if G._reject_risk_page(html):
                     continue
@@ -110,12 +114,26 @@ def repair(settings, *, apply=False, paid_items_only=False):
                     features['_detail_rosters'] = [key for key in
                         ('five_star_character_chains', 'five_star_weapon_refinements') if key in features]
                     item['features'].update(features)
+            if character_chains_only:
+                # 重放时沿用列表/详情来源优先级，最终仅写角色链数；其他特征和列保持原值。
+                for key, item in values.items():
+                    projected = dict(original[key]['features'])
+                    if item['game_id'] == 10302:
+                        for name in ('five_star_character_chains', 'constellation_cnt'):
+                            if name in item['features']:
+                                projected[name] = item['features'][name]
+                    values[key] = {**original[key], 'features': projected}
             changes = {k: v for k, v in values.items() if v != original[k]}
             report = {'mode': 'apply' if apply else 'preview', 'snapshots': len(rows),
-                      'scope': 'paid_items' if paid_items_only else 'all_fields',
+                      'scope': 'character_chains' if character_chains_only else 'paid_items' if paid_items_only else 'all_fields',
                       'raw_pages': len(sources), 'changed_snapshots': len(changes),
                       'field_changes': {name: sum(v[name] != original[k][name] for k, v in changes.items())
                                         for name in FIELDS}}
+            if character_chains_only:
+                report['zero_chain_entries_added'] = sum(
+                    max(0, sum(entry['value'] == 0 for entry in v['features'].get('five_star_character_chains', []))
+                        - sum(entry['value'] == 0 for entry in original[k]['features'].get('five_star_character_chains', [])))
+                    for k, v in changes.items())
             if apply and changes:
                 conn.execute('CHECKPOINT')
                 backup = settings.paths.db.parent / 'backups' / ('fields-' + dt.datetime.now().strftime('%Y%m%dT%H%M%S%f') + '.duckdb')
@@ -145,6 +163,9 @@ def repair(settings, *, apply=False, paid_items_only=False):
 if __name__ == '__main__':
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument('--apply', action='store_true')
-    args.add_argument('--paid-items-only', action='store_true', help='只补齐鸣潮额外付费商品，不改变其他字段')
+    scope = args.add_mutually_exclusive_group()
+    scope.add_argument('--paid-items-only', action='store_true', help='只补齐鸣潮额外付费商品，不改变其他字段')
+    scope.add_argument('--character-chains-only', action='store_true', help='只更新鸣潮角色链数，补入未标注的0命角色')
     options = args.parse_args()
-    print(json.dumps(repair(config.load_settings(), apply=options.apply, paid_items_only=options.paid_items_only), ensure_ascii=False, indent=2))
+    print(json.dumps(repair(config.load_settings(), apply=options.apply, paid_items_only=options.paid_items_only,
+                           character_chains_only=options.character_chains_only), ensure_ascii=False, indent=2))

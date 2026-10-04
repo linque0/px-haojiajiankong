@@ -98,6 +98,48 @@ def test_roster_zero_chain_rejects_noise_and_truncated_chain():
     assert [r['value'] for r in chains] == [0]
 
 
+def test_zero_chain_name_only_sections_exclude_four_stars_and_noise():
+    features = X.roster_features('五星角色：3命安可，鉴心，0命维里奈，未提供，无，凌阳…；四星角色：满命散华，白芷；五星武器：千古洑流，精2裁春')
+    assert features['five_star_character_chains'] == [
+        {'name': '安可', 'value': 3}, {'name': '鉴心', 'value': 0}, {'name': '维里奈', 'value': 0}]
+    assert features['constellation_cnt'] == 3
+    assert features['five_star_weapon_refinements'] == [{'name': '裁春', 'value': 2}]
+
+
+@pytest.mark.parametrize('heading', ['3个五星角色', '五星角色'])
+@pytest.mark.parametrize('via_detail', [False, True])
+def test_zero_chains_reach_dashboard_and_survive_short_list(state, heading, via_detail):
+    title = f'80级，20黄；{heading}：2命安可，鉴心，维里奈；12个四星角色：满命散华；1个五星武器：精1千古洑流'
+    post(state, 'cards', card_html(CARD_TITLE if via_detail else title))
+    if via_detail:
+        post(state, 'detail', '<div class="product-detail"><a href="/buy/10302/1">鸣潮</a>'
+             f'<div class="line-clamp-5">{title}</div></div>')
+        post(state, 'cards', card_html(CARD_TITLE))
+    assert G.handle_listings(state, {'game_id': ['10302']})['rows'][0]['cells']['constellation_cnt'] == [
+        {'name': '安可', 'value': 2}, {'name': '鉴心', 'value': 0}, {'name': '维里奈', 'value': 0}]
+
+
+def test_character_chain_repair_updates_only_rosters_and_scalar(state):
+    from tools.repair_listing_fields import repair
+    post(state, 'cards', card_html('80级，20黄；3个五星角色：2命安可，鉴心，维里奈；1个五星武器：精1千古洑流'))
+    with db.connect(state.settings.paths.db) as conn:
+        features = json.loads(conn.execute('SELECT extracted_features FROM fct_listing_snapshot').fetchone()[0])
+        features['five_star_character_chains'] = [{'name': '安可', 'value': 2}]
+        conn.execute('UPDATE fct_listing_snapshot SET level=NULL, extracted_features=?', [json.dumps(features)])
+        before = conn.execute('SELECT * EXCLUDE(extracted_features) FROM fct_listing_snapshot').fetchall()
+    report = repair(state.settings, character_chains_only=True)
+    assert report['changed_snapshots'] == 1 and report['zero_chain_entries_added'] == 2
+    assert not any(report['field_changes'].values())
+    assert repair(state.settings, apply=True, character_chains_only=True)['changed_snapshots'] == 1
+    with db.connect(state.settings.paths.db, read_only=True) as conn:
+        assert conn.execute('SELECT * EXCLUDE(extracted_features) FROM fct_listing_snapshot').fetchall() == before
+        updated = json.loads(conn.execute('SELECT extracted_features FROM fct_listing_snapshot').fetchone()[0])
+    assert len(updated['five_star_character_chains']) == 3
+    assert {k: v for k, v in updated.items() if k not in {'five_star_character_chains', 'constellation_cnt'}} == {
+        k: v for k, v in features.items() if k not in {'five_star_character_chains', 'constellation_cnt'}}
+    assert repair(state.settings, character_chains_only=True)['changed_snapshots'] == 0
+
+
 def test_card_title_without_attribute_keeps_weapon_section():
     title = '80级，25个五星角色：' + '满命维里奈，' * 30 + '17个五星武器：精1千古洑流'
     html = f'<a href="/product/123456/1"><div class="smallCardTitle">{title}</div></a>'
