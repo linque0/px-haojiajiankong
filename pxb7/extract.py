@@ -45,6 +45,10 @@ KEYWORD_COLUMNS = (
 
 # [卡/筛] 词条的取值通道：命中优先读卡片字段（docs/02 §4.A1 标注）
 CARD_FEATURE_SOURCES: dict[str, str] = {
+    "account_level_cnt": "level",
+    "yellow_cnt": "yellow_cnt",
+    "five_star_chars_cnt": "five_star_chars",
+    "five_star_weapons_cnt": "five_star_weapons",
     "primogems_cnt": "primogems",
     "intertwined_fate_cnt": "intertwined_fate",
 }
@@ -300,6 +304,34 @@ def listing_text(title: str | None, card_fields: Mapping[str, Any] | None) -> st
     return " ".join(parts)
 
 
+def roster_features(text: str) -> dict[str, Any]:
+    """按五星/四星段解析具名升格；不把四星满命写成五星链数。重复武器保留。"""
+    headings = list(re.finditer(r"\d+\s*个?\s*([五四]星(?:角色|武器))\s*[:：]", text))
+    features: dict[str, Any] = {}
+    for i, heading in enumerate(headings):
+        kind = heading.group(1)
+        if kind not in ("五星角色", "五星武器"):
+            continue
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = re.split(r"[;；]|车架模组|摩托饰品|详情看图|服饰[:：]", text[heading.end():end])[0]
+        entries = []
+        pattern = (r"^(满命|满链|(?:[0-6零一二三四五六])\s*(?:命|链)|共鸣链\s*[0-6])\s*(.+)$"
+                   if kind == "五星角色" else
+                   r"^(满精|精\s*[1-5一二三四五]|谐振\s*[1-5一二三四五](?:阶)?)\s*(.+)$")
+        feature = "constellation_cnt" if kind == "五星角色" else "five_star_weapon_refined"
+        for item in re.split(r"[,，、]", section):
+            match = re.match(pattern, item.strip())
+            if match:
+                value = _convert_value(feature, match.group(1))
+                if value is not None:
+                    entries.append({"name": match.group(2).strip(), "value": value})
+        if entries:
+            key = "five_star_character_chains" if kind == "五星角色" else "five_star_weapon_refinements"
+            features[key] = entries
+            features[feature] = max(item["value"] for item in entries)
+    return features
+
+
 def extract_listing(keywords: Sequence[Keyword], *, listing_id: str,
                     title: str | None = None,
                     card_fields: Mapping[str, Any] | None = None) -> Extraction:
@@ -345,6 +377,11 @@ def extract_listing(keywords: Sequence[Keyword], *, listing_id: str,
             if kw.feature_map in out.features and not isinstance(out.features[kw.feature_map], bool):
                 continue                        # 首次命中优先，避免同类词条互相覆盖
             out.features[kw.feature_map] = matched.value
+    if any(kw.profile_id in ("wuwa_10302", "genshin_10026") for kw, _ in compiled):
+        # 存量标量保留兼容；有段式标题时，只允许五星段贡献角色链数。
+        if re.search(r"\d+\s*个?\s*[五四]星角色\s*[:：]", title or ""):
+            out.features.pop("constellation_cnt", None)
+        out.features.update(roster_features(title or ""))
     return out
 
 

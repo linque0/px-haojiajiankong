@@ -43,7 +43,7 @@ def test_seed_structure_and_metadata() -> None:
     assert data["version"]
     assert "§4.A" in data["generated_from"]
     profiles = data["profiles"]
-    assert len(profiles) == 2, "原神 10026 + 鸣潮 10302（docs/02 §4.A1 + §4.A4）"
+    assert len(profiles) == 3, "原神 10026 + 鸣潮 10302 + 三角洲 10371（docs/02 §4.A1 + §4.A4 + §4.B）"
     profile = profiles[0]
     assert profile["profile_id"] == "genshin_10026"
     assert profile["game_id"] == 10026
@@ -150,7 +150,7 @@ def test_no_credentials_in_seed() -> None:
 
 def test_seed_db_rows_shape() -> None:
     rows = X.seed_db_rows()
-    assert len(rows) == 43, "原神 18 条 + 鸣潮 25 条（docs/02 §4.A1 + §4.A4）"
+    assert len(rows) == 75, "原神 18 条 + 鸣潮 25 条 + 三角洲 32 条（docs/02 §4.A1 + §4.A4 + §4.B）"
     from pxb7 import db
     for row in rows:
         assert set(row) == set(db.KEYWORD_COLUMNS)
@@ -158,17 +158,19 @@ def test_seed_db_rows_shape() -> None:
     per_profile: dict[str, int] = {}
     for row in rows:
         per_profile[row["profile_id"]] = per_profile.get(row["profile_id"], 0) + 1
-    assert per_profile == {"genshin_10026": 18, "wuwa_10302": 25}
+    assert per_profile == {"genshin_10026": 18, "wuwa_10302": 25, "delta_10371": 32}
     assert len({row["keyword_id"] for row in rows}) == len(rows), "keyword_id 不得重复"
 
 
 def test_seed_profiles_scoped_by_game_id() -> None:
-    """gateway.py:572 按 game_id 取词表；未建画像的游戏返回空表、不用别家顶替（docs/02 §G）。"""
+    """按 game_id 取词表：各游戏只拿自己的画像（docs/02 §4.B、§G）。"""
     genshin = X.seed_keywords(game_id=10026)
     wuwa = X.seed_keywords(game_id=10302)
+    delta = X.seed_keywords(game_id=10371)
     assert {kw.profile_id for kw in genshin} == {"genshin_10026"} and len(genshin) == 18
     assert {kw.profile_id for kw in wuwa} == {"wuwa_10302"} and len(wuwa) == 25
-    assert X.seed_keywords(game_id=10371) == [], "三角洲尚无画像（种子只有 10026/10302）"
+    assert {kw.profile_id for kw in delta} == {"delta_10371"} and len(delta) == 32
+    assert X.seed_keywords(game_id=99999) == [], "未建画像的游戏须返回空表、不用别家顶替"
 
 
 # --------------------------------------------------------------------------- #
@@ -304,7 +306,7 @@ def test_wuwa_manming_stays_out_of_ceiling_domain(wuwa_keywords: list[X.Keyword]
     """样文最关键发现：12 个四星中 11 个标「满命」——四星满命不得进锚点层（§4.A4/§6）。"""
     got = X.extract_listing(wuwa_keywords, listing_id="W2",
                             title="鸣潮 官服 12个四星角色：满命散华, 满命丹瑾")
-    assert got.features["constellation_cnt"] == 6, "满 → 6（extract.py 归一约定）"
+    assert "constellation_cnt" not in got.features, "四星满命不能当作五星共鸣链"
     ceiling_ids = {kw.keyword_id for kw in wuwa_keywords if kw.price_anchor == "ceiling"}
     assert {h.keyword_id for h in got.hits} & ceiling_ids == set(), "满命/N命 均非 ceiling 锚点"
 
@@ -334,3 +336,130 @@ def test_wuwa_no_hit_is_not_fabricated(wuwa_keywords: list[X.Keyword]) -> None:
     got = X.extract_listing(wuwa_keywords, listing_id="W5", title="鸣潮 官服 出号")
     assert got.hit is False
     assert got.features == {} and got.features_json() is None
+
+
+# --------------------------------------------------------------------------- #
+# 三角洲行动 delta_v0（docs/02 §4.B 2026-10-03 站内实样校准）
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def delta_keywords() -> list[X.Keyword]:
+    """三角洲画像 delta_v0（详情页全文实样 + 4 份列表 raw 真实标题）。"""
+    return X.seed_keywords(profile_id="delta_10371")
+
+
+def _hits_map(got: X.Extraction) -> dict[str, str]:
+    return {h.keyword: h.hit_text for h in got.hits}
+
+
+def test_delta_seed_profile_shape() -> None:
+    delta = X.load_seed()["profiles"][2]
+    assert delta["profile_id"] == "delta_10371" and delta["game_id"] == 10371
+    assert delta["game_name"] == "三角洲行动" and delta["keyword_profile"] == "delta_v0"
+    assert "实样" in delta["source"]
+    keywords = X.seed_keywords(profile_id="delta_10371")
+    assert len(keywords) == 32
+    assert {k.keyword_type for k in keywords} <= set(X.KEYWORD_TYPES)
+    assert all(k.price_anchor in X.PRICE_ANCHORS for k in keywords)
+    assert {k.keyword for k in keywords if k.price_anchor == "ceiling"} >= {
+        "红皮", "典藏枪皮", "进阶安全箱", "曼德尔砖"}
+
+
+def test_delta_asset_units_are_not_misconverted(delta_keywords: list[X.Keyword]) -> None:
+    """W/M 单位不做数值换算：hit_text 保留原值，且资产类不得写成 _cnt（会把 57.4M 读成 57）。"""
+    got = X.extract_listing(delta_keywords, listing_id="D1",
+                            title="总资产：57.4M，哈夫币：100W，流动资产35.9M，不动资产21.4M")
+    assert not any(k.startswith("delta_") and k.endswith("_cnt") for k in got.features), \
+        f"资产类不得进 _cnt（单位未换算）：{got.features}"
+    hits = _hits_map(got)
+    assert hits["总资产"] == "57.4M" and hits["哈夫币"] == "100W"
+    assert hits["流动资产"] == "35.9M" and hits["不动资产"] == "21.4M"
+
+
+def test_delta_real_list_title_extraction(delta_keywords: list[X.Keyword]) -> None:
+    """列表标题实测（4 份 raw dump）：「红皮2/刀皮4/传说武器52/史诗武器75/烽火60级：铂金」。"""
+    title = ("31图 找回包赔 官方验号 总资产：136.8M，哈夫币：2511W，红皮2，刀皮4，传说武器52，"
+             "史诗武器75，烽火60级：铂金，战场50级：上等兵，通行证1")
+    got = X.extract_listing(delta_keywords, listing_id="D2", title=title)
+    feat = got.features
+    assert feat["delta_legendary_weapon_cnt"] == 52 and feat["delta_epic_weapon_cnt"] == 75
+    assert feat["delta_knife_skin_cnt"] == 4 and feat["delta_red_skin_cnt"] == 2
+    assert feat["delta_fenghuo_level_cnt"] == 60 and feat["delta_battlefield_level_cnt"] == 50
+    hits = _hits_map(got)
+    assert hits["烽火段位"] == "铂金" and hits["战场段位"] == "上等兵", "段位不枚举、原样进 hit_text"
+    assert hits["总资产"] == "136.8M" and "找回包赔" in hits
+
+
+def test_delta_zero_coin_is_a_value_not_missing(delta_keywords: list[X.Keyword]) -> None:
+    """样文 `0曼德尔币`：0 是有效值；没写该段才是不命中（不猜 0）。"""
+    got = X.extract_listing(delta_keywords, listing_id="D3",
+                            title="【货币】26三角币，0曼德尔币，169三角券")
+    assert got.features["delta_mandela_coin_cnt"] == 0
+    assert got.features["delta_triangle_coin_cnt"] == 26
+    assert got.features["delta_triangle_coupon_cnt"] == 169
+    missing = X.extract_listing(delta_keywords, listing_id="D4", title="【货币】26三角币，169三角券")
+    assert "delta_mandela_coin_cnt" not in missing.features, "未写该段 = 不命中，不编造 0"
+
+
+def test_delta_detail_sections_and_positive_tags(delta_keywords: list[X.Keyword]) -> None:
+    """详情页段式：皮肤分门计数 + 挂饰/载具 + 战损比 + 正面标签（进阶安全箱/可二次实名/QQ登录）。"""
+    text = ("【安全箱】进阶安全箱；【特勤处等级】仓库LV.8，训练中心LV.6；"
+            "【干员皮肤5】露娜黑天际线；【已有捆绑包5】黑天际线捆绑包；【近战皮肤3】近战武器-处刑者；"
+            "【挂饰34】挂饰-无人机；【载具3】轮式突击炮-荣耀；战损比0.4/1.1/1.5；"
+            "【QQ登录】【可二次实名】")
+    got = X.extract_listing(delta_keywords, listing_id="D5", title=text)
+    feat = got.features
+    assert feat["delta_operator_skin_cnt"] == 5 and feat["delta_bundle_cnt"] == 5
+    assert feat["delta_melee_skin_cnt"] == 3 and feat["delta_charm_cnt"] == 34
+    assert feat["delta_vehicle_cnt"] == 3
+    assert feat["delta_second_realname_flag"] is True, "可二次实名是正面标签（不吃折价系数）"
+    assert "delta_service_recall_flag" not in feat, "样文没有 找回包赔 就不命中"
+    assert {"进阶安全箱", "安全箱", "战损比", "QQ登录", "可二次实名"} <= set(_hits_map(got))
+
+
+def test_delta_no_hit_is_not_fabricated(delta_keywords: list[X.Keyword]) -> None:
+    got = X.extract_listing(delta_keywords, listing_id="D6", title="三角洲行动 官服 出号")
+    assert got.hit is False and got.features == {}
+
+
+def test_delta_footer_boilerplate_is_not_a_hit(delta_keywords: list[X.Keyword]) -> None:
+    """页尾提示语（每张详情页都有）不得当命中：典藏/安全箱 须带数量或【】/档位前缀。"""
+    boiler = ("【典藏皮肤颜色请以典藏展示为准，安全箱等时效性道具请以游戏内数据验号为准】"
+              "【QQ登录】【可二次实名】【官方截图】")
+    got = X.extract_listing(delta_keywords, listing_id="D7", title=boiler)
+    hit_keywords = set(_hits_map(got))
+    assert "典藏枪皮" not in hit_keywords and "安全箱" not in hit_keywords, \
+        "提示语刷 100% 假阳性：典藏/安全箱 必须带数量或【】/档位前缀"
+    # 正例：真实写法仍命中，且典藏数量进 hit_text
+    real = X.extract_listing(delta_keywords, listing_id="D8",
+                             title="【安全箱】进阶安全箱；典藏枪皮3；【干员皮肤5】露娜黑天际线")
+    real_hits = _hits_map(real)
+    assert real_hits["安全箱"] == "【安全箱】" and real_hits["进阶安全箱"] == "进阶安全箱"
+    assert real_hits["典藏枪皮"] == "3"
+
+
+def test_delta_second_realname_negation_not_confused(delta_keywords: list[X.Keyword]) -> None:
+    """非法字串陷阱：`不可二次实名` 含子串"可二次实名"，正向词必须 lookbehind 排除。"""
+    negative = X.extract_listing(delta_keywords, listing_id="D9",
+                                 title="【QQ登录】【不可二次实名】【官方截图】")
+    assert negative.features.get("delta_no_second_realname_flag") is True
+    assert "delta_second_realname_flag" not in negative.features, \
+        "不可二次实名 ≠ 可二次实名"
+    positive = X.extract_listing(delta_keywords, listing_id="D10",
+                                 title="【QQ登录】【可二次实名】")
+    assert positive.features.get("delta_second_realname_flag") is True
+    assert "delta_no_second_realname_flag" not in positive.features
+
+
+def test_delta_kd_ratio_bracket_form_and_special_weapon_skin(
+        delta_keywords: list[X.Keyword]) -> None:
+    """实测写法带右括号（【烽火地带战损比】11.3/1.1/1.5）；
+    特殊武器皮肤是独立类目，不得被读成武器皮肤总数。"""
+    got = X.extract_listing(delta_keywords, listing_id="D11",
+                            title="武器皮肤13；【特殊武器皮肤】复合弓-黑-天际线；"
+                                  "【烽火地带战损比】11.3/1.1/1.5")
+    assert got.features["delta_weapon_skin_cnt"] == 13, "特殊武器皮肤不计入总数"
+    assert _hits_map(got)["战损比"] == "11.3/1.1/1.5", "战损比须吃掉右括号】再取值"
+    special_only = X.extract_listing(delta_keywords, listing_id="D12",
+                                     title="【特殊武器皮肤2】复合弓-黑-天际线")
+    assert "delta_weapon_skin_cnt" not in special_only.features, \
+        "只有特殊武器段时不得编造武器皮肤总数"

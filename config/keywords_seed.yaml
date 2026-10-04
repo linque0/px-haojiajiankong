@@ -23,9 +23,9 @@
 #       每行上方注释含 keyword_id、证据来源与 confidence（high=样文直接实测 / medium=文档支撑待实测）。
 # 注意：本文件不得出现任何凭据/登录态内容。
 
-version: v0.2.0
-generated_from: docs/02 §4.A0 + §4.A1 + §4.A4
-doc_version: v0.3（2026-10-03）
+version: v0.3.0
+generated_from: docs/02 §4.A0 + §4.A1 + §4.A4 + §4.B
+doc_version: v0.4（2026-10-03）
 updated_at: '2026-10-03'
 
 profiles:
@@ -376,7 +376,7 @@ profiles:
       - keyword_id: wuwa_seg_nming
         keyword: N命
         keyword_type: segment
-        extract_pattern: '((?:[1-6])\s*命)'
+        extract_pattern: '((?:[0-6一二三四五六])\s*(?:命|链)|共鸣链\s*[0-6])'
         feature_map: constellation_cnt
         price_anchor: none
         weight_v0: null
@@ -404,7 +404,7 @@ profiles:
       - keyword_id: wuwa_seg_jingn
         keyword: 精N
         keyword_type: segment
-        extract_pattern: '精\s*([1-5])'
+        extract_pattern: '(?:精|谐振(?:等级)?)\s*([1-5一二三四五])'
         feature_map: five_star_weapon_refined
         price_anchor: none
         weight_v0: null
@@ -611,6 +611,417 @@ profiles:
         keyword_type: floor
         extract_pattern: '(死邮|邮箱不出售|不出邮)'
         feature_map: floor_dead_mail_flag
+        price_anchor: floor
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 查证
+        enabled: true
+        updated_at: '2026-10-03'
+
+  # ============ 三角洲行动 10371（delta_v0，docs/02 §4.B 2026-10-03 站内实样校准）============
+  # 依据：用户提供的站内商品**详情页全文实样**（一手）+ 本地 4 份列表页 raw（80 张卡）真实标题
+  #       + 2 份详情页 raw（含推荐位的完整小卡文本）。
+  # 纪律：① W/M 单位的资产类**不做数值换算**（塞进 _cnt 会把 57.4M 读成 57）→ 只记命中，
+  #          hit_text 原样保留（"57.4M"/"100W"），单位换算列 v1；② 纯整数计数才进 _cnt；
+  #          ③ 段位名不做枚举（不臆造档位表），就地捕获段位文本进 hit_text；
+  #          ④ 0 与缺失分开（`0曼德尔币` 是有效值；没写该段才是不命中）；
+  #          ⑤ 页尾提示语排除（实测每张详情页都有「典藏皮肤颜色请以典藏展示为准，
+  #              安全箱等时效性道具请以游戏内数据验号为准」）→ 典藏/安全箱必须带数量或
+  #              【】/档位前缀才命中，否则会被提示语刷成 100% 假阳性；
+  #          ⑥ 否定式单独立行（「不可二次实名」含子串"可二次实名"→ 正向词加 (?<!不) 断言，
+  #              负向另建 delta_risk_no_second_realname，两信号互斥不互相冒充）。
+  - profile_id: delta_10371
+    game_id: 10371
+    game_name: 三角洲行动
+    keyword_profile: delta_v0          # 与 dim_game.keyword_profile 对齐
+    source: 站内实样（详情页全文 + 列表标题，2026-10-03）
+    keywords:
+      # ---------------- resource：资产（W/M 记法，只记命中）----------------
+      - keyword_id: delta_asset_total
+        keyword: 总资产
+        keyword_type: resource
+        extract_pattern: '总资产\s*[:：]\s*([\d.]+[WM])'
+        feature_map: null               # 单位未换算：命中 + hit_text 原值，不做错误数值化
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_asset_liquid
+        keyword: 流动资产
+        keyword_type: resource
+        extract_pattern: '流动资产\s*[:：]?\s*([\d.]+[WM])'
+        feature_map: null
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_asset_fixed
+        keyword: 不动资产
+        keyword_type: resource
+        extract_pattern: '不动资产\s*[:：]?\s*([\d.]+[WM])'
+        feature_map: null
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_hafcoin
+        keyword: 哈夫币
+        keyword_type: resource
+        extract_pattern: '哈夫币\s*[:：]\s*([\d.]+[WM]?)'
+        feature_map: null               # 同上：W/M 不换算（docs/02 §4.B 记法条目）
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- resource：货币（整数计数，0 是有效值）----------------
+      - keyword_id: delta_coin_triangle
+        keyword: 三角币
+        keyword_type: resource
+        extract_pattern: '(\d{1,6})\s*三角币'
+        feature_map: delta_triangle_coin_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_coin_mandela
+        keyword: 曼德尔币
+        keyword_type: resource
+        extract_pattern: '(\d{1,6})\s*曼德尔币'
+        feature_map: delta_mandela_coin_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_coin_coupon
+        keyword: 三角券
+        keyword_type: resource
+        extract_pattern: '(\d{1,6})\s*三角券'
+        feature_map: delta_triangle_coupon_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- ceiling：溢价锚（红皮/典藏/安全箱；样文 + §4.B 文档）----------------
+      - keyword_id: delta_ceiling_red_skin
+        keyword: 红皮
+        keyword_type: ceiling
+        extract_pattern: '((?:红皮|大红)\s*\d{0,4})'   # 标题实测写法「红皮2」：连计数一起捕获，裸词也能命中
+        feature_map: delta_red_skin_cnt
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + §4.B
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_ceiling_collection
+        keyword: 典藏枪皮
+        keyword_type: ceiling
+        extract_pattern: '(?:典藏枪皮|典藏)(?!皮肤颜色|展示)\s*[:：]?\s*(\d{1,4})'
+        feature_map: null               # 必须带数量才命中：页尾「典藏皮肤颜色请以典藏展示为准」是提示语
+        price_anchor: ceiling           # （实测每张详情页都有该句）→ 负向断言排除；无数量的裸"典藏"不命中
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文（页尾提示）+ §4.B
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_ceiling_safebox_adv
+        keyword: 进阶安全箱
+        keyword_type: ceiling
+        extract_pattern: '(进阶安全箱|高级安全箱)'
+        feature_map: null               # 时效性道具（需验号确认）→ 命中记录、权重待校准
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_ceiling_mandel_brick
+        keyword: 曼德尔砖
+        keyword_type: ceiling
+        extract_pattern: '(曼德尔砖)'
+        feature_map: null
+        price_anchor: ceiling
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 文档（§4.B；样文未出现 → 待实测）
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- segment：外观清单计数（样文分门类给出）----------------
+      - keyword_id: delta_cnt_operator_skin
+        keyword: 干员皮肤
+        keyword_type: segment
+        extract_pattern: '干员皮肤\s*[:：]?\s*(\d{1,2})'
+        feature_map: delta_operator_skin_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_bundle
+        keyword: 捆绑包
+        keyword_type: segment
+        extract_pattern: '捆绑包\s*[:：]?\s*(\d{1,2})'
+        feature_map: delta_bundle_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_melee_skin
+        keyword: 近战皮肤
+        keyword_type: segment
+        extract_pattern: '近战皮肤\s*[:：]?\s*(\d{1,2})'
+        feature_map: delta_melee_skin_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_weapon_skin
+        keyword: 武器皮肤
+        keyword_type: segment
+        extract_pattern: '(?<!特殊)武器皮肤\s*[:：]?\s*(\d{1,4})'
+        feature_map: delta_weapon_skin_cnt
+        price_anchor: none               # 排除「【特殊武器皮肤N】」段（独立类目，不是总数）
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_legendary_weapon
+        keyword: 传说武器
+        keyword_type: segment
+        extract_pattern: '传说武器\s*[:：]?\s*(\d{1,4})'
+        feature_map: delta_legendary_weapon_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_epic_weapon
+        keyword: 史诗武器
+        keyword_type: segment
+        extract_pattern: '史诗武器\s*[:：]?\s*(\d{1,4})'
+        feature_map: delta_epic_weapon_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_knife_skin
+        keyword: 刀皮
+        keyword_type: segment
+        extract_pattern: '刀皮\s*[:：]?\s*(\d{1,4})'
+        feature_map: delta_knife_skin_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_charm
+        keyword: 挂饰
+        keyword_type: segment
+        extract_pattern: '挂饰\s*[:：]?\s*(\d{1,3})'
+        feature_map: delta_charm_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文（【挂饰34】）
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_cnt_vehicle
+        keyword: 载具
+        keyword_type: segment
+        extract_pattern: '载具\s*[:：]?\s*(\d{1,2})'
+        feature_map: delta_vehicle_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文（【载具3】）
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- segment：等级/段位（弱特征；段位不枚举）----------------
+      - keyword_id: delta_lv_fenghuo
+        keyword: 烽火等级
+        keyword_type: segment
+        extract_pattern: '烽火\s*(\d{1,3})\s*级'
+        feature_map: delta_fenghuo_level_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_lv_battlefield
+        keyword: 战场等级
+        keyword_type: segment
+        extract_pattern: '战场\s*(\d{1,3})\s*级'
+        feature_map: delta_battlefield_level_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_lv_battlepass
+        keyword: 通行证等级
+        keyword_type: segment
+        extract_pattern: '通行证\s*(\d{1,3})\s*级'
+        feature_map: delta_battlepass_level_cnt
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文（通行证免费版）
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_rank_fenghuo
+        keyword: 烽火段位
+        keyword_type: segment
+        extract_pattern: '烽火\s*\d{1,3}\s*级\s*[:：]\s*([^\s，,；;【]{1,8})'
+        feature_map: null               # 段位名不做枚举，原文进 hit_text（如"铂金"）
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_rank_battlefield
+        keyword: 战场段位
+        keyword_type: segment
+        extract_pattern: '战场\s*\d{1,3}\s*级\s*[:：]\s*([^\s，,；;【]{1,8})'
+        feature_map: null
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_seg_kd_ratio
+        keyword: 战损比
+        keyword_type: segment
+        extract_pattern: '战损比\s*[】\]\):：]*\s*([\d.]+/[\d.]+/[\d.]+)'
+        feature_map: null               # 三口径含义未标注 → v0 只记命中（原值进 hit_text），不解析
+                                        # 实测写法带右括号：【烽火地带战损比】11.3/1.1/1.5
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- segment：服务与转移标签（正面信号，非折价）----------------
+      - keyword_id: delta_seg_safebox
+        keyword: 安全箱
+        keyword_type: segment
+        extract_pattern: '(【安全箱】|(?:基础|进阶|高级|顶级)安全箱)'
+        feature_map: null               # 排除页尾提示语「安全箱等时效性道具请以游戏内数据验号为准」：
+        price_anchor: none              # 必须带【】或档位前缀才算该号有安全箱
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_seg_service_recall
+        keyword: 找回包赔
+        keyword_type: segment
+        extract_pattern: '(找回包赔)'
+        feature_map: delta_service_recall_flag
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_seg_second_realname
+        keyword: 可二次实名
+        keyword_type: segment
+        extract_pattern: '(?<!不)(可二次实名|支持二次实名)'
+        feature_map: delta_second_realname_flag
+        price_anchor: none               # 正面标签（与 §5「实名不可改 ×0.7–0.85」相对），不吃折价系数
+        weight_v0: null                  # 否定式「不可二次实名」含子串"可二次实名"→ lookbehind 排除，
+        weight_v1: null                  # 负向信号单独立行（delta_risk_no_second_realname）
+        weight_v2: null
+        source: 样文 + 列表标题实测
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_risk_no_second_realname
+        keyword: 不可二次实名
+        keyword_type: risk
+        extract_pattern: '(不可二次实名|不支持二次实名)'
+        feature_map: delta_no_second_realname_flag
+        price_anchor: none               # 转移受限 = 折价/风险信号（§5 实名侧），不正面计价
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 列表标题实测（attrnamelist 与标题尾部均出现）
+        enabled: true
+        updated_at: '2026-10-03'
+      - keyword_id: delta_seg_login_qq
+        keyword: QQ登录
+        keyword_type: segment
+        extract_pattern: '(QQ登录|微信登录|steam国服)'
+        feature_map: null               # 具体渠道留在 hit_text（样文【QQ登录】、旧实样【steam国服】）
+        price_anchor: none
+        weight_v0: null
+        weight_v1: null
+        weight_v2: null
+        source: 样文
+        enabled: true
+        updated_at: '2026-10-03'
+      # ---------------- floor：共享折价词（§4.A0 口径；三角洲按渠道/区服分域）----------------
+      - keyword_id: delta_floor_channel
+        keyword: 渠道服
+        keyword_type: floor
+        extract_pattern: '(渠道服|国际服)'
+        feature_map: floor_channel_flag
         price_anchor: floor
         weight_v0: null
         weight_v1: null
