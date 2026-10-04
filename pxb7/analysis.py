@@ -34,6 +34,7 @@ from typing import Any, Mapping
 import duckdb
 
 from . import db
+from . import extract as X
 from .config import Settings
 
 # --------------------------------------------------------------------------- #
@@ -464,6 +465,130 @@ def split_csv_lines(result: Mapping[str, Any]) -> list[str]:
     lines.append("[split] 每份均为 UTF-8 带 BOM、列与源文件一致；pandas 读："
                  "pd.read_csv(r'<文件>', encoding='utf-8-sig')")
     return lines
+
+
+# --------------------------------------------------------------------------- #
+# 按游戏「看板列」精选导出（2026-10-04 用户指令：鸣潮数据表按看板列呈现）
+# 列名/取值口径 = 看板「数据浏览」该游戏的列（gateway._GAME_COLUMNS）+ 基础列；
+# 单元格文本与 dashboard.html cellText 同口径：链 "N命名称"、精炼 "精N名称"、
+# 资源/付费商品 "名称：值"（资源 0 是值照列，未采到的省略；空值不伪装成 0，docs/10 §5.1）。
+# 取数走关系 API（不拼接 SQL，同本模块导出口径）。
+# --------------------------------------------------------------------------- #
+
+# 鸣潮（10302）：基础列 + 该游戏自己的词表说法（docs/02 §4.A4；列序 = 用户指定表头）
+WUWA_CURATED_HEADERS: tuple[str, ...] = (
+    "listing_id", "游戏", "价格 ¥", "等级", "黄数", "五星角色", "五星武器",
+    "共鸣链（N命）", "武器精炼（精N）", "资源", "额外付费商品", "区服",
+    "商品发布时间", "收藏",
+)
+
+# 精选版式取的数据列（对全部游戏同一组，版式按游戏登记；未登记拒绝导出，不硬套别家术语）
+_CURATED_COLUMNS: tuple[str, ...] = (
+    "listing_id", "game_name", "price_yuan", "level", "yellow_cnt", "five_star_chars",
+    "five_star_weapons", "feat_constellation_cnt", "feat_five_star_weapon_refined",
+    "extracted_features", "server", "publish_time", "favorites_cnt",
+)
+
+
+def _roster_text(entries: Any, *, prefix: str = "", suffix: str = "") -> str | None:
+    """具名清单 [{name, value}] → "6命长离、0命守岸人"（suffix=命）/ "精1千古洑流"（prefix=精）。
+
+    与 dashboard.html cellText 同口径：链 = 值在前（"6命长离"），精炼 = "精" 在前（"精1音曦"）。
+    """
+    if not entries:
+        return None
+    parts = [f"{prefix}{e.get('value')}{suffix}{e.get('name')}"
+             for e in entries if e.get("name")]
+    return "、".join(parts) or None
+
+
+def _fmt_wuwa_cells(row: Mapping[str, Any]) -> list[Any]:
+    """一行 v_listing_analysis → 鸣潮看板列单元格（缺失回退与 dashboard 同口径）。"""
+    features = json.loads(row["extracted_features"]) if row["extracted_features"] else {}
+    publish = row["publish_time"]
+    return [
+        row["listing_id"],
+        row["game_name"],
+        row["price_yuan"],
+        row["level"] if row["level"] is not None else features.get("account_level_cnt"),
+        row["yellow_cnt"],
+        row["five_star_chars"] if row["five_star_chars"] is not None
+        else features.get("five_star_chars_cnt"),
+        row["five_star_weapons"] if row["five_star_weapons"] is not None
+        else features.get("five_star_weapons_cnt"),
+        _roster_text(features.get("five_star_character_chains"), suffix="命")
+        or features.get("constellation_cnt")
+        or row["feat_constellation_cnt"],
+        _roster_text(features.get("five_star_weapon_refinements"), prefix="精")
+        or features.get("five_star_weapon_refined")
+        or row["feat_five_star_weapon_refined"],
+        "；".join(f"{label}：{features.get(key)}"
+                  for key, label in X.WUWA_RESOURCES if features.get(key) is not None) or None,
+        "；".join(f"{label}：{'、'.join(str(item) for item in features.get(key) or [])}"
+                  for key, label in X.WUWA_PAID_ITEMS if features.get(key)) or None,
+        row["server"],
+        publish.isoformat(sep=" ", timespec="seconds") if publish is not None else None,
+        row["favorites_cnt"],
+    ]
+
+
+CURATED_GAME_LAYOUTS: dict[int, tuple[tuple[str, ...], Any]] = {
+    10302: (WUWA_CURATED_HEADERS, _fmt_wuwa_cells),   # 鸣潮；其他游戏按用户指令登记
+}
+
+
+def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *,
+                       game_id: int | None = None) -> dict[str, Any]:
+    """按游戏导出「看板列」精选 CSV（一行一个 listing 的最新态，列 = 用户指定的看板口径）。
+
+    - 编码 UTF-8 带 BOM；与 export_main_csv 同源（v_listing_analysis），列做精选与重命名；
+    - `game_id` 必填且必须已登记版式（CURATED_GAME_LAYOUTS），否则明确报错不猜测；
+    - 默认路径：`data/analysis/by_game/pxb7-listings-<日期>-<游戏名>-<game_id>-看板列.csv`。
+    """
+    if game_id is None:
+        raise ValueError("看板列导出需要 --game（版式按游戏登记，不做通用猜测）")
+    spec = CURATED_GAME_LAYOUTS.get(int(game_id))
+    if spec is None:
+        registered = "、".join(str(g) for g in sorted(CURATED_GAME_LAYOUTS))
+        raise ValueError(f"game_id={game_id} 未登记看板列版式（已登记：{registered}）")
+    headers, render = spec
+
+    with db.connect(settings.paths.db, read_only=True) as conn:
+        rel = _relation_for(conn, MAIN_CSV_VIEW, game_id)
+        rel = rel.select(*[duckdb.ColumnExpression(c) for c in _CURATED_COLUMNS])
+        rel = rel.order("TRY_CAST(listing_id AS BIGINT) DESC")
+        names = list(rel.columns)
+        rows_raw = rel.fetchall()
+        game_name = (_relation_for(conn, MAIN_CSV_VIEW, game_id)
+                     .aggregate("max(game_name) AS game_name").fetchone()[0]) or str(int(game_id))
+
+    if out_path is None:
+        out_path = (Path(settings.project_root) / "data" / "analysis" / "by_game"
+                    / f"pxb7-listings-{_dt.datetime.now().strftime('%Y%m%d')}"
+                      f"-{game_name}-{int(game_id)}-看板列.csv")
+    path = Path(out_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = [render(dict(zip(names, row))) for row in rows_raw]
+
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rendered)
+
+    return {"path": str(path), "rows": len(rendered), "columns": list(headers),
+            "column_count": len(headers), "game_id": int(game_id),
+            "game_name": game_name, "bytes": path.stat().st_size}
+
+
+def export_curated_csv_lines(result: Mapping[str, Any]) -> list[str]:
+    """看板列导出结果的纯文本摘要（CLI 用）。"""
+    return [
+        f"[csv] 已导出 {result['rows']} 行 × {result['column_count']} 列 → {result['path']}",
+        f"[csv] {result['game_name']}（{result['game_id']}）看板列版式；体积 "
+        f"{result['bytes'] / 1024:.1f} KB；UTF-8 带 BOM（pandas 读 encoding='utf-8-sig'）",
+        "[csv] 口径：一行 = 一个 listing 的最新一轮；资源只列采到的项（0 是值），"
+        "链/精炼优先具名清单，缺失回退计数；空单元格 = 未采到（docs/10 §5.1）",
+    ]
 
 
 def render_dictionary(*, man: Mapping[str, Any], quality: Mapping[str, Any]) -> str:

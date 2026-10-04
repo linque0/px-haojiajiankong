@@ -310,6 +310,16 @@ WUWA_PAID_ITEMS = (
     ("character_skins", "人物皮肤"),
 )
 
+# 鸣潮资源五件套（feature 键 → 展示名）。资源字段口径见 docs/02 §4.A4：
+# 采到的 0 是值（docs/09 零值纪律），未采到为 None（不填 0）。
+WUWA_RESOURCES = (
+    ("astrite_cnt", "星声"),
+    ("lunite_cnt", "月相"),
+    ("afterglow_coral_cnt", "余波珊瑚"),
+    ("lustrous_tide_cnt", "浮金波纹"),
+    ("radiant_tide_cnt", "铸潮波纹"),
+)
+
 
 def wuwa_paid_item_features(text: str) -> dict[str, Any]:
     """仅从明确的具名段提取商品；服饰是站点的人物皮肤段名。"""
@@ -334,6 +344,7 @@ _ROSTER_TAIL_NOISE = re.compile(
 _ROSTER_NAME = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9·‧・]{1,24}$")
 _ROSTER_NON_NAME = re.compile(
     r"[五四]星|武器|角色|车架|摩托|涂装|服饰|皮肤|音擎|光锥|等|共|售|价|浏览")
+_ROSTER_HEADING = re.compile(r"(?:\d+\s*个?\s*)?([五四]星(?:角色|武器))\s*[:：]")
 
 
 def _zero_chain_name(item: str) -> str | None:
@@ -341,8 +352,10 @@ def _zero_chain_name(item: str) -> str | None:
 
     像角色名才收；纯数字、杂词、被截断的具名升格条目（如孤立的「3命」）不冒充 0命。
     """
+    if re.search(r"[.…⋯]", item):
+        return None                    # 截断的角色名不按完整名字补入。
     name = _ROSTER_TAIL_NOISE.sub("", item).strip()
-    if not name or name.isdigit():
+    if not name or name.isdigit() or name in {"无", "暂无", "没有", "未知", "未提供", "未标注"}:
         return None
     if re.match(r"^(?:满命|满链|(?:[0-6零一二三四五六])\s*(?:命|链)|共鸣链\s*[0-6])", name):
         return None
@@ -357,7 +370,7 @@ def roster_features(text: str) -> dict[str, Any]:
     五星角色段内未标注 N命/满命 的角色按 0命 记入链数列表（值 0，保持原文顺序）；
     五星武器段不猜精0，仍只收具名精炼。
     """
-    headings = list(re.finditer(r"\d+\s*个?\s*([五四]星(?:角色|武器))\s*[:：]", text))
+    headings = list(_ROSTER_HEADING.finditer(text))
     features: dict[str, Any] = {}
     for i, heading in enumerate(headings):
         kind = heading.group(1)
@@ -434,7 +447,7 @@ def extract_listing(keywords: Sequence[Keyword], *, listing_id: str,
             out.features[kw.feature_map] = matched.value
     if any(kw.profile_id in ("wuwa_10302", "genshin_10026") for kw, _ in compiled):
         # 存量标量保留兼容；有段式标题时，只允许五星段贡献角色链数。
-        if re.search(r"\d+\s*个?\s*[五四]星角色\s*[:：]", title or ""):
+        if any(heading.group(1).endswith("角色") for heading in _ROSTER_HEADING.finditer(title or "")):
             out.features.pop("constellation_cnt", None)
         out.features.update(roster_features(title or ""))
     if any(kw.profile_id == "wuwa_10302" for kw, _ in compiled):
