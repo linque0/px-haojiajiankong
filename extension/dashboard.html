@@ -69,6 +69,24 @@
   .mini.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
   .paths-form input[type=text] { width: 100%; }
   .paths-form label { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
+  .toolbar label { margin: 0; }
+  .toolbar .muted { font-size: 12px; }
+  select { background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+           border-radius: 8px; padding: 5px 8px; font-size: 12px; }
+  select:disabled, button:disabled { opacity: .45; cursor: default; }
+  .cell-text, .cell-details { min-width: 150px; max-width: 250px; text-align: left;
+      white-space: normal; overflow-wrap: anywhere; }
+  .cell-text { display: inline-block; }
+  .cell-details summary { cursor: pointer; list-style: none; }
+  .cell-details summary::-webkit-details-marker { display: none; }
+  .cell-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+      overflow: hidden; }
+  .cell-action { display: block; color: var(--blue); font-size: 12px; margin-top: 3px; }
+  .cell-details[open] .cell-preview, .cell-details[open] .cell-expand,
+  .cell-details:not([open]) .cell-collapse { display: none; }
+  .cell-full { margin-top: 4px; }
+  .cell-details summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -79,8 +97,9 @@
     <span class="pill" id="channel-pill">通道：前端 B 插件 · 只读当前页面</span>
     <span class="pill" id="script-pill">用户脚本 …</span>
     <span class="pill" id="ext-pill">扩展 …</span>
-    <button class="ghost" id="upd" style="display:none;padding:4px 12px;font-size:12px">
-      一键更新插件</button>
+    <button class="ghost" id="upd" style="display:none;padding:4px 12px;font-size:12px"
+            title="安装/更新 Tampermonkey 用户脚本（油猴通道）；扩展的更新看「扩展」徽章或弹窗按钮">
+      一键更新油猴脚本</button>
     <span style="flex:1"></span>
     <span class="muted"><span class="dot" id="live-dot"></span> 自动刷新 5s
       <label style="display:inline;margin-left:8px"><input type="checkbox" id="auto" checked> 开</label></span>
@@ -107,17 +126,35 @@
       <div id="hist"></div>
     </section>
     <section>
-      <h2>词表命中 Top 10</h2>
+      <h2 id="kw-title">词表命中 Top 10</h2>
+      <div class="toolbar">
+        <label>游戏 <select id="k-game"></select></label>
+        <span class="muted">各游戏用自己的词表：原神看原石/满命…，鸣潮看共鸣链/精N/星声…（未混算）</span>
+      </div>
       <div id="keywords"></div>
     </section>
   </div>
 
   <section>
-    <h2>最新入库数据（15 条）</h2>
-    <table id="listings"><thead><tr>
-      <th>listing_id</th><th>任务</th><th>轮次</th><th>价格 ¥</th><th>等级</th><th>黄数</th>
-      <th>区服</th><th>邮箱</th><th>浏览</th><th>收藏</th>
-    </tr></thead><tbody></tbody></table>
+    <h2>入库数据（可翻页；列名按所选游戏自己的关键词）</h2>
+    <div class="toolbar">
+      <label>游戏筛选 <select id="l-game"></select></label>
+      <label>每页 <select id="l-size">
+        <option value="15">15</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select></label>
+      <span id="l-total" class="muted"></span>
+      <span style="flex:1"></span>
+      <button class="ghost mini" id="l-first">首页</button>
+      <button class="ghost mini" id="l-prev">上一页</button>
+      <span id="l-page" class="muted">—</span>
+      <button class="ghost mini" id="l-next">下一页</button>
+      <button class="ghost mini" id="l-last">末页</button>
+    </div>
+    <p class="muted">— 表示未采到，0 表示明确为零。超过30字的文本默认折叠，点击展开查看全文。列表采集优先复用完整标题，缺失时按商品编号限速补采。也可在扩展选择「详情页采集」，逐个正常打开商品读取角色链数与武器精炼；进度与待补齐数量见扩展弹窗。若遇网站验证，完成验证后重新采集本页。</p>
+    <div style="overflow-x:auto"><table id="listings"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
 
   <div class="cols">
@@ -172,14 +209,16 @@
     <section>
       <h2>插件设置（脚本自动应用：≤5 分钟或页面刷新生效）</h2>
       <label><input type="checkbox" id="c-auto"> 自动采集（浏览到列表/详情页时入库）</label>
+      <label>扩展采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
       <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
-      <label>每次采集张数<input type="number" id="c-cards" min="16" max="200" step="16"></label>
+      <label>每次采集张数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
+      <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="2" max="15" step="1"></label>
       <label><input type="checkbox" id="c-debug"> 调试日志（控制台）</label>
       <p class="muted" style="margin:2px 0 0">
-        站点一页只在 DOM 里渲染 16 张卡片（四个游戏实测一致）；把「每次采集张数」调大后，
-        脚本会在页面内滚动触发站点自身的加载更多（每 2 秒一轮，连续两轮无新增即停），
-        然后把整页 DOM 一次性入库（幂等合并，不产生重复行）。</p>
+        扩展支持 1～200 任意整数，只采前 N 个唯一商品；不足时滚动加载更多，连续两轮无新增即停。详情模式复用一个后台标签页逐个采集，标题就绪即读取，无逐商品固定等待。<br>
+        去重间隔：同一标签页会话内，同一网址成功自动采集后再次自动采集的最短间隔；手动采集不受限制。<br>
+        SPA 等待：站内路由切换后给页面渲染预留的等待；详情队列不逐张套用。全文请求间隔仅用于列表模式。采集进度和取消操作在扩展弹窗中。</p>
       <div style="margin-top:10px">
         <button id="save">保存设置</button>
         <button class="ghost" id="reset">恢复默认</button>
@@ -208,7 +247,7 @@
       </div>
       <div id="risk"></div>
       <p class="muted" style="margin-bottom:0">
-        通道说明：插件只读取你正在浏览的页面（「每次采集张数」调大时在本页内触发站点自身的
+        通道说明：插件支持列表采集与后台串行详情采集（「每次采集张数」调大时在列表内触发站点自身的
         加载更多，等同手动滚动；不猜 URL、不请求站外接口），不受 Playwright 风控退避影响；
         拦截页拒收不入库；插件通道覆盖不完整，下架推断固定关闭。</p>
     </section>
@@ -241,21 +280,32 @@ function render(s) {
   $("task-pill").textContent = `任务 ${s.task.task_id}（${s.task.name}）`;
   $("script-pill").textContent = `插件批次 ${s.stats.batches} · 最近 ${s.stats.last_batch_at ?? "—"}`;
   const sc = s.script || {};
+  const ext = sc.extension || {};
   const upd = $("upd");
+  // 通道判定：哪个通道最近上报过就是「在用」通道；另一条按备用通道如实提示但不催更，
+  // 避免把油猴旧脚本的更新提示误读成「扩展里没有采集脚本」（扩展自带 sweep.js+content.js）。
+  const extRecentlyUsed = !!(ext.seen_at && (!sc.seen_at || ext.seen_at >= sc.seen_at));
   if (sc.update_available) {
-    $("script-pill").textContent =
-      `用户脚本 v${sc.installed_version} → 最新 v${sc.latest_version}（建议更新）`;
-    $("script-pill").style.color = "var(--amber)";
     upd.style.display = "inline-block";
+    if (extRecentlyUsed) {
+      $("script-pill").textContent =
+        `用户脚本（油猴备用通道）v${sc.installed_version}，最新 v${sc.latest_version}；` +
+        `已改用扩展的话可在 Tampermonkey 停用旧脚本，本提示随之消失`;
+      $("script-pill").style.color = "";
+    } else {
+      $("script-pill").textContent =
+        `用户脚本（油猴通道）v${sc.installed_version} → 最新 v${sc.latest_version}（建议更新）`;
+      $("script-pill").style.color = "var(--amber)";
+    }
   } else {
     $("script-pill").textContent = sc.installed_version
-      ? `用户脚本 v${sc.installed_version}（最新）`
-      : (sc.latest_version ? `用户脚本 最新 v${sc.latest_version}（尚未收到上报）` : "用户脚本 未检测到");
+      ? `用户脚本（油猴通道）v${sc.installed_version}（最新）`
+      : (sc.latest_version ? `用户脚本（油猴通道）最新 v${sc.latest_version}（尚未收到上报）`
+                           : "用户脚本（油猴通道）未检测到");
     $("script-pill").style.color = "";
     upd.style.display = "none";
   }
   // 扩展通道独立显示（v0.3.0+ 自更新：按磁盘代码自动重载，首次仍需手动加载一次）
-  const ext = sc.extension || {};
   if (ext.update_available) {
     $("ext-pill").textContent =
       `扩展 v${ext.installed_version} → 最新 v${ext.latest_version}（将自动重载；也可运行 更新浏览器扩展.bat）`;
@@ -294,18 +344,7 @@ function render(s) {
     r => r.round, r => r.rows);
   $("hist").innerHTML = bars(s.db.price_histogram || [],
     r => `¥${r.bucket}–${r.bucket + 200}`, r => r.count);
-  $("keywords").innerHTML = bars(s.db.top_keywords || [],
-    r => r.keyword, r => r.hits);
-
-  $("listings").querySelector("tbody").innerHTML = (s.db.latest_listings || [])
-    .map(r => `<tr><td class="num">${esc(r.listing_id)}</td>` +
-      `<td>${esc(r.game_name ? r.game_name : (r.game_id ?? "—"))}</td>` +
-      `<td class="num">${esc(r.round)}</td>` +
-      `<td class="num">${fmt(r.price)}</td><td class="num">${fmt(r.level)}</td>` +
-      `<td class="num">${fmt(r.yellow_cnt)}</td><td>${esc(r.server)}</td>` +
-      `<td>${esc(r.mail_status)}</td><td class="num">${fmt(r.viewers)}</td>` +
-      `<td class="num">${fmt(r.favorites)}</td></tr>`).join("") ||
-      '<tr><td colspan="10" class="muted">暂无数据</td></tr>';
+  renderKeywordsPanel(s);
 
   if (s.targets) renderTargets(s.targets);
   if (s.paths) renderPaths(s.paths);
@@ -405,10 +444,12 @@ async function savePaths(payload, okText) {
 }
 
 function fillConfig(c) {
+  $("c-mode").value = c.collection_mode || "list";
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
   $("c-cards").value = c.cards_target || 16;
   $("c-settle").value = c.spa_settle_ms;
+  $("c-title-interval").value = (c.title_interval_ms || 3000) / 1000;
   $("c-debug").checked = !!c.debug;
 }
 
@@ -429,15 +470,17 @@ async function saveConfig(payload) {
 }
 
 $("save").addEventListener("click", () => saveConfig({
+  collection_mode: $("c-mode").value,
   auto_ingest: $("c-auto").checked,
   reingest_interval_min: Number($("c-interval").value),
   cards_target: Number($("c-cards").value),
   spa_settle_ms: Number($("c-settle").value),
+  title_interval_ms: Number($("c-title-interval").value) * 1000,
   debug: $("c-debug").checked,
 }));
 $("reset").addEventListener("click", () => saveConfig({
-  auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
-  spa_settle_ms: 2500, debug: false }));
+  collection_mode: "list", auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
+  spa_settle_ms: 2500, debug: false, title_interval_ms:3000 }));
 
 $("targets-all").addEventListener("click", () => {
   const ids = Array.from($("targets").querySelectorAll("input[data-task]:not(:disabled)"))
@@ -483,11 +526,160 @@ $("stopgw").addEventListener("click", async () => {
   }
 });
 
+// ---------- 数据浏览：按游戏换列名 + 翻页（不只最近 15 条） ----------
+const listState = { gameId: 0, offset: 0, limit: 15, total: 0 };
+let lastStats = null;
+let gamesSig = "";
+let listingsRequest = 0;
+const expandedCells = new Set();
+// 重建表格前读取当前展开状态，避免依赖异步 toggle 事件与刷新之间的先后顺序。
+function saveExpandedCells() {
+  $("listings").querySelectorAll("details[data-cell]").forEach(cell => {
+    if (cell.open) expandedCells.add(cell.dataset.cell);
+    else expandedCells.delete(cell.dataset.cell);
+  });
+}
+
+const cellText = (v, key, identity) => {
+  if (v === null || v === undefined || v === "") return "—";
+  let text;
+  if (Array.isArray(v)) {
+    if (key === "resources") {
+      text = v.map(item => `${item.name}：${item.value == null ? "—" : fmt(item.value)}`).join("；");
+    } else if (key === "paid_items") {
+      text = v.map(item => `${item.name}：${item.value == null ? "—" : item.value}`).join("；");
+    } else {
+      const rank = key === "five_star_weapon_refined" ? "精" : "命";
+      text = v.map(item => rank === "精"
+        ? `精${item.value}${item.name}` : `${item.value}命${item.name}`).join("、");
+    }
+  } else {
+    if (typeof v === "number") return fmt(v);
+    text = String(v);
+  }
+  if (Array.from(text).length > 30) {
+    const label = {resources:"资源", paid_items:"额外付费商品", constellation_cnt:"角色链数", five_star_weapon_refined:"武器精炼"}[key] || "内容";
+    return `<details class="cell-details" data-cell="${esc(identity)}"${expandedCells.has(identity) ? " open" : ""}>`
+      + `<summary><span class="cell-preview">${esc(text)}</span><span class="cell-action">`
+      + `<span class="cell-expand">展开${label}</span><span class="cell-collapse">收起${label}</span></span></summary>`
+      + `<div class="cell-full">${esc(text)}</div></details>`;
+  }
+  return `<span class="cell-text">${esc(text)}</span>`;
+};
+
+function fillGameSelects(games, current) {
+  const options = ['<option value="0">全部游戏（通用列）</option>'].concat(
+    (games || []).map(g => `<option value="${g.game_id}">${esc(g.game_name)}（${fmt(g.rows)} 行）</option>`));
+  ["l-game", "k-game"].forEach((id) => {
+    const sel = $(id);
+    sel.innerHTML = options.join("");
+    sel.value = String(current);
+  });
+}
+
+function renderKeywordsPanel(s) {
+  const byGame = (s && s.db && s.db.top_keywords_by_game) || {};
+  const entry = byGame[String(listState.gameId)];
+  if (listState.gameId && entry) {
+    $("kw-title").textContent = `词表命中 Top 10（${entry.game_name}）`;
+    $("keywords").innerHTML = bars(entry.top || [], r => r.keyword, r => r.hits);
+    return;
+  }
+  $("kw-title").textContent = "词表命中 Top 10（全部游戏；各游戏词表不混算）";
+  $("keywords").innerHTML = bars((s && s.db && s.db.top_keywords) || [],
+    r => r.keyword, r => r.hits);
+}
+
+async function loadListings() {
+  const requestId = ++listingsRequest;
+  const params = new URLSearchParams({ game_id: String(listState.gameId),
+                                       limit: String(listState.limit),
+                                       offset: String(listState.offset) });
+  let data;
+  try {
+    data = await (await fetch("/listings?" + params.toString())).json();
+  } catch (e) {
+    return;
+  }
+  if (requestId !== listingsRequest || !data || !data.ok) return;
+
+  listState.total = data.total || 0;
+  const pages = Math.max(1, Math.ceil(listState.total / listState.limit));
+  let page = Math.floor(listState.offset / listState.limit) + 1;
+  if (page > pages) {                     // 数据变少/筛游戏后回到最后一页
+    listState.offset = (pages - 1) * listState.limit;
+    page = pages;
+  }
+  const sig = JSON.stringify(data.games || []);
+  if (sig !== gamesSig) { gamesSig = sig; fillGameSelects(data.games || [], listState.gameId); }
+
+  const cols = data.columns || [];
+  const showViewers = data.show_viewers !== false;
+  saveExpandedCells();
+  $("listings").querySelector("thead tr").innerHTML =
+    ["listing_id", "游戏", "轮次", "价格 ¥"].map(h => `<th>${h}</th>`).join("") +
+    cols.map(c => `<th title="取值来源：${c.source === "feat" ? "抽取特征 extracted_features" : "卡片字段"}">${esc(c.label)}</th>`).join("") +
+    (showViewers ? ["浏览", "收藏"] : ["收藏"]).map(h => `<th>${h}</th>`).join("");
+  $("listings").querySelector("tbody").innerHTML = (data.rows || []).map(r =>
+    `<tr><td class="num"><a href="https://www.pxb7.com/product/${encodeURIComponent(r.listing_id)}/1#pxb7-collect-detail" target="_blank" rel="noopener noreferrer" title="打开商品详情并采集一次">${esc(r.listing_id)}</a></td>` +
+    `<td>${esc(r.game_name)}</td>` +
+    `<td class="num">${esc(r.round)}</td>` +
+    `<td class="num">${fmt(r.price)}</td>` +
+    cols.map(c => {
+      const value = (r.cells || {})[c.key];
+      if (c.key === "five_star_weapon_refined" && (r.cells || {}).five_star_weapons === 0) {
+        return `<td class="num">无五星武器</td>`;
+      }
+      if ((c.key === "five_star_weapons" || c.key === "five_star_weapon_refined") && value == null) {
+        return `<td><a href="https://www.pxb7.com/product/${encodeURIComponent(r.listing_id)}/1#pxb7-collect-detail" target="_blank" rel="noopener noreferrer">打开详情补齐</a></td>`;
+      }
+      const identity = JSON.stringify([r.game_id, r.listing_id, r.round, c.key]);
+      return `<td class="num">${cellText(value, c.key, identity)}</td>`;
+    }).join("") +
+    (showViewers ? `<td class="num">${fmt(r.viewers)}</td>` : "") +
+    `<td class="num">${fmt(r.favorites)}</td></tr>`
+  ).join("") || `<tr><td colspan="${4 + cols.length + (showViewers ? 2 : 1)}" class="muted">暂无数据</td></tr>`;
+
+  $("l-total").textContent = `共 ${fmt(listState.total)} 行`;
+  $("l-page").textContent = `第 ${page} / ${pages} 页`;
+  $("l-first").disabled = $("l-prev").disabled = page <= 1;
+  $("l-last").disabled = $("l-next").disabled = page >= pages;
+}
+
+$("l-first").addEventListener("click", () => { listState.offset = 0; loadListings(); });
+$("l-prev").addEventListener("click", () => {
+  listState.offset = Math.max(0, listState.offset - listState.limit); loadListings();
+});
+$("l-next").addEventListener("click", () => {
+  listState.offset += listState.limit; loadListings();
+});
+$("l-last").addEventListener("click", () => {
+  const pages = Math.max(1, Math.ceil(listState.total / listState.limit));
+  listState.offset = (pages - 1) * listState.limit; loadListings();
+});
+$("l-size").addEventListener("change", () => {
+  listState.limit = Number($("l-size").value) || 15;
+  listState.offset = 0;
+  gamesSig = "";                        // 行数展示与页码一起刷新
+  loadListings();
+});
+["l-game", "k-game"].forEach((id) => $(id).addEventListener("change", (e) => {
+  listState.gameId = Number(e.target.value) || 0;
+  listState.offset = 0;
+  ["l-game", "k-game"].forEach((other) => {      // 两个下拉互相同步（同一份筛选状态）
+    if ($(other).value !== String(listState.gameId)) $(other).value = String(listState.gameId);
+  });
+  loadListings();
+  renderKeywordsPanel(lastStats);       // 词表面板跟随同一游戏筛选
+}));
+
 let timer = null;
 async function refresh() {
   try {
     const s = await (await fetch("/stats")).json();
+    lastStats = s;
     render(s);
+    await loadListings();
     $("live-dot").className = "dot";
   } catch (e) {
     $("live-dot").className = "dot bad";

@@ -56,7 +56,8 @@ def test_cli_init_db_then_status(settings, tmp_path, capsys) -> None:
         ).fetchone()
     finally:
         conn.close()
-    assert total == 43 and enabled == 42, "43 条种子（原神 18 + 鸣潮 25）中 1 条为 disabled 占位"
+    assert total == 75 and enabled == 74, \
+        "75 条种子（原神 18 + 鸣潮 25 + 三角洲 32）中 1 条为 disabled 占位"
 
     assert cli.main(["status", "--db", str(settings.paths.db)]) == cli.EXIT_OK
     out = capsys.readouterr().out
@@ -64,7 +65,7 @@ def test_cli_init_db_then_status(settings, tmp_path, capsys) -> None:
 
     assert cli.main(["status", "--db", str(settings.paths.db), "--json"]) == cli.EXIT_OK
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tables"]["dim_keyword"] == 43, "原神 18 + 鸣潮 25（docs/02 §4.A1/§4.A4）"
+    assert payload["tables"]["dim_keyword"] == 75, "原神 18 + 鸣潮 25 + 三角洲 32（docs/02 §4）"
     # risk_state 是机器本地状态（真实冒烟会把它推进到 task_paused/backoff）；
     # 这里只断言字段契约，不断言具体 level，保证测试不依赖外部状态。
     for key in ("level", "reason", "backoff_until", "last_trigger", "consecutive"):

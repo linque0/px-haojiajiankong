@@ -1,9 +1,9 @@
 /**
  * pxb7 采集助手（前端 B）—— 背景服务（MV3 Service Worker）
  *
- * 职责：唯一的出网口。内容脚本与弹窗的所有本机网关调用都经这里代理：
+ * 职责：本机网关代理。内容脚本与弹窗的所有本机网关调用都经这里代理：
  * - host_permissions 已声明回环地址，扩展页面/SW 的 fetch 不走页面 CORS；
- * - 只访问本机回环网关（不请求任何 pxb7 地址），零新增 pxb7 请求（docs/01 §8 W4 口径）。
+ * - 只访问本机回环网关；MAIN 脚本可按商品编号限速请求站点公开完整标题。
  *
  * 安全边界说明：本文件**不含任何 SQL / 数据库访问**——所有持久化都在 Python 网关内以
  * 参数化 DuckDB 查询完成；此处只有固定的 HTTP 端点与 JSON 序列化。
@@ -14,6 +14,8 @@ const GATEWAY = "http://127.0.0.1:8765";
 
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
 const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail"]);
+importScripts("collection.js");
+const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)));
 
 // 自更新：解包扩展的「重新加载」按浏览器是手动操作（Chrome/Edge/夸克都忽略命令行里的
 // chrome:// 地址），但扩展可以重载自己——chrome.runtime.reload() 会按磁盘目录重新读取。
@@ -51,13 +53,14 @@ async function checkSelfUpdate(autoReload) {
   if (!latest || !isNewer(latest, OWN_VERSION)) return { ok: true, latest, update_available: false };
   chrome.action.setBadgeBackgroundColor({ color: "#f59e0b" });
   chrome.action.setBadgeText({ text: "↑" });
-  if (autoReload) chrome.runtime.reload();     // 解包扩展按磁盘代码重载（浏览器无关）
-  return { ok: true, latest, update_available: true, reloading: !!autoReload };
+  const running = (await collection.progress()).progress?.status === "running";
+  if (autoReload && !running) chrome.runtime.reload(); // 等采集结束再自动更新
+  return { ok: true, latest, update_available: true, reloading: !!autoReload && !running };
 }
 
 async function gfetch(path, options) {
   try {
-    const response = await fetch(GATEWAY + path, options);
+    const response = await fetch(GATEWAY + path, {...options, signal:AbortSignal.timeout(20000)});
     const text = await response.text();
     let data = null;
     try { data = JSON.parse(text); } catch (e) { /* 非 JSON 保持 null */ }
@@ -76,8 +79,21 @@ function withJsonBody(payload) {
   };
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return undefined;
+  const jobs = {
+    "collection-begin":() => collection.begin(sender, msg),
+    "collection-progress":() => collection.update(sender, msg),
+    "collection-status":() => collection.progress(),
+    "collection-cancel":() => collection.cancel(),
+    "detail-start":() => collection.start(sender, msg),
+    "detail-context":() => collection.context(sender),
+    "detail-result":() => collection.result(sender, msg),
+  };
+  if (jobs[msg.type]) {
+    jobs[msg.type]().then(sendResponse).catch(e => sendResponse({ok:false, err:String(e.message || e)}));
+    return true;
+  }
   if (msg.type === "ingest") {
     if (!INGEST_PATHS.has(msg.path)) {          // 路径白名单：只代理固定采集端点
       sendResponse({ ok: false, err: "unsupported-path" });
@@ -136,8 +152,8 @@ async function collectActiveTab() {
   const tab = tabs && tabs[0];
   if (!tab || !tab.id) return { ok: false, err: "没有活动标签页" };
   try {
-    await chrome.tabs.sendMessage(tab.id, { type: "collect-now" });
-    return { ok: true };
+    const result = await chrome.tabs.sendMessage(tab.id, { type: "collect-now" });
+    return result || { ok: false, err: "采集未返回结果" };
   } catch (e) {
     return { ok: false, err: "当前页不是 pxb7 列表/详情页（或扩展刚安装需刷新页面）" };
   }

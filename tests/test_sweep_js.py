@@ -26,9 +26,9 @@ SWEEP_JS = EXT / "sweep.js"
 def test_sweep_js_exists_and_is_wired_into_manifest() -> None:
     assert SWEEP_JS.is_file(), "缺少 sweep.js"
     manifest = json.loads((EXT / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.5.0"
     js = manifest["content_scripts"][0]["js"]
-    assert js == ["sweep.js", "content.js"], "sweep.js 必须先于 content.js 注入"
+    assert js == ["sweep.js", "titles.js", "content.js"], "辅助脚本必须先于 content.js 注入"
     text = SWEEP_JS.read_text(encoding="utf-8")
     for marker in ("countCards", "findMoreControl", "nextAction", "scrollForMore",
                    "clampTarget", "maxCards: 200", "intervalMs: 2000"):
@@ -43,16 +43,33 @@ def test_content_script_uses_sweep_and_keeps_single_page_default() -> None:
         assert marker in content, f"内容脚本缺少要素：{marker}"
     assert "cards_target: 16" in content, "默认一次一页（16 张），不改变既有行为"
     assert "sweep: stats" in content, "加载更多后的第二次入库须带 sweep 统计（透明记录）"
-    assert "data-listing-id" not in content and "productid" not in content, \
-        "卡片计数统一走 sweep.js（避免两处选择器漂移）"
+    assert "SWEEP.countCards(document)" in content, "卡片计数统一走 sweep.js"
 
 
 def test_userscript_has_same_sweep_contract() -> None:
     text = (PROJECT_ROOT / "extension" / "pxb7-collector.user.js").read_text(encoding="utf-8")
     for marker in ("clampTarget", "expandCards", "findMoreControl", "cards_target",
-                   "pxb7-p-cards", "maxRounds: 12"):
+                   "pxb7-p-cards", "maxRounds: 12", "sweep: stats"):
         assert marker in text, f"油猴脚本缺少要素：{marker}"
     assert "@version      0.6.0" in text and 'SCRIPT_VERSION = "0.6.0"' in text
+    # 双通道版本上报分开（看板按通道分别显示更新状态，不得混写）
+    assert "channel=userscript" in text, "油猴脚本须以 userscript 通道上报版本"
+    background = (EXT / "background.js").read_text(encoding="utf-8")
+    assert 'params.set("channel", "extension")' in background, \
+        "扩展须以 extension 通道上报版本（与油猴分开）"
+
+
+def test_dashboard_tells_channels_apart() -> None:
+    """看板更新提示按通道区分：扩展是最近使用的通道时，油猴旧脚本按「备用通道」提示而非催更。
+
+    背景（2026-10-04 用户反馈）：看板曾显示「用户脚本 v0.1.0 → 最新 v0.6.0（建议更新）」，
+    被误读成「扩展里没整合采集脚本」。实际扩展自带 sweep.js+content.js；横幅说的是
+    Tampermonkey 里还装着的旧版油猴脚本。
+    """
+    dash = (PROJECT_ROOT / "extension" / "dashboard.html").read_text(encoding="utf-8")
+    for marker in ("油猴备用通道", "停用旧脚本", "extRecentlyUsed", "油猴通道）v"):
+        assert marker in dash, f"看板缺少通道区分要素：{marker}"
+    assert "一键更新油猴脚本" in dash, "更新按钮须写明是油猴脚本通道（扩展更新另有入口）"
 
 
 def test_ui_exposes_cards_target() -> None:
@@ -60,10 +77,10 @@ def test_ui_exposes_cards_target() -> None:
     popup_js = (EXT / "popup.js").read_text(encoding="utf-8")
     dash = (PROJECT_ROOT / "extension" / "dashboard.html").read_text(encoding="utf-8")
     assert 'id="c-cards"' in popup_html, "弹窗缺少「每次采集张数」输入"
-    assert 'min="16" max="200"' in popup_html
+    assert 'min="1" max="200"' in popup_html
     for name, text in (("popup.js", popup_js), ("dashboard.html", dash)):
         assert "c-cards" in text and "cards_target" in text, f"{name} 未接线 cards_target"
-    assert 'id="c-cards"' in dash and 'min="16" max="200"' in dash
+    assert 'id="c-cards"' in dash and 'min="1" max="200"' in dash
     assert "16 张" in popup_html or "16 张" in dash, "必须向用户说明站点一页 16 张"
     panel = (PROJECT_ROOT / "extension" / "pxb7-collector.user.js").read_text(encoding="utf-8")
     assert 'id="pxb7-p-cards"' in panel and "cards_target" in panel

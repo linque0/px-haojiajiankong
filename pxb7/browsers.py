@@ -184,9 +184,9 @@ INSTALL_STEPS = (
 
 # 已装 Tampermonkey 的浏览器（如夸克）可走免维护的用户脚本通道
 USERSCRIPT_HINT = (
-    "替代方案（零维护）：这些浏览器若装有 Tampermonkey，可直接加载 v0.5.0 用户脚本"
-    "（看板「安装/状态」区的安装链接）——脚本的 @updateURL 指向本机网关，服务在跑时会"
-    "自动检查更新，不必手动「重新加载」。"
+    "替代方案（零维护）：这些浏览器若装有 Tampermonkey，可直接加载仓库最新版用户脚本"
+    "（extension/pxb7-collector.user.js，看板「安装/状态」区的安装链接）——脚本的 @updateURL "
+    "指向本机网关，服务在跑时会自动检查更新，不必手动「重新加载」。"
 )
 
 

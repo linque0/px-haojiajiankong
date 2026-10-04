@@ -35,6 +35,7 @@ function note(text, bad) {
 function errorText(result, fallback) {
   if (result && result.data && typeof result.data.error === "string") return result.data.error;
   if (result && typeof result.err === "string") return result.err;
+  if (result && typeof result.error === "string") return result.error;
   return fallback;
 }
 
@@ -150,6 +151,41 @@ function renderPaths(p) {
     }));
 }
 
+let settingsDirty = false;
+function modeHelp() {
+  $("mode-help").textContent = $("c-mode").value === "detail"
+    ? "从列表保存清单和价格，再逐个打开详情采集；关闭弹窗仍可继续。切换方式用于下一次任务。"
+    : "读取列表全文；缺失时按商品编号限速获取，可能受网站预检限制。";
+  $("c-title-interval").disabled = $("c-mode").value === "detail";
+}
+["c-mode", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-debug"].forEach(id => {
+  $(id).addEventListener("input", () => {settingsDirty = true; modeHelp();});
+});
+function renderProgress(p) {
+  if (!p) return;
+  const labels = {running:"进行中", done:"已完成", partial:"部分完成", error:"失败", cancelled:"已取消", paused:"已暂停"};
+  const busy = p.status === "running";
+  $("progress-mode").textContent = (p.mode === "detail" ? "详情页采集" : "列表采集") + " · " + (labels[p.status] || p.status);
+  $("progress-count").textContent = `${p.processed}/${p.requested} 张`;
+  $("collect-progress").value = Math.min(100, Math.round(p.processed / Math.max(1, p.requested) * 100));
+  $("progress-phase").textContent = p.phase;
+  const seconds = Math.max(0, Math.round(((busy ? Date.now() : p.updatedAt) - p.startedAt) / 1000));
+  $("progress-detail").textContent = `入库 ${p.succeeded} · 失败 ${p.failed} · ${seconds} 秒`
+    + (p.incomplete ? ` · 待补齐 ${p.incomplete}` : "");
+  $("cancel-collect").disabled = !busy;
+  $("grab").disabled = busy;
+}
+function refreshProgress() {
+  chrome.runtime.sendMessage({type:"collection-status"}, reply => {
+    if (!chrome.runtime.lastError && reply?.ok) renderProgress(reply.progress);
+  });
+}
+$("cancel-collect").addEventListener("click", () => {
+  chrome.runtime.sendMessage({type:"collection-cancel"}, reply => {
+    if (reply?.ok) {note("采集已取消，已入库数据保留"); refreshProgress();}
+    else note(errorText(reply, "取消失败"), true);
+  });
+});
 async function refresh() {
   const res = await gfetch("/stats");
   if (!res.ok || !res.data || !res.data.ok) {
@@ -166,39 +202,65 @@ async function refresh() {
   renderBatches(s.recent_batches || []);
   if (s.targets) renderTargets(s.targets);
   if (s.paths) renderPaths(s.paths);
+  if (settingsDirty) return;
   const c = s.config || {};
+  $("c-mode").value = c.collection_mode || "list";
+  modeHelp();
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
   $("c-cards").value = c.cards_target || 16;
   $("c-settle").value = c.spa_settle_ms;
+  $("c-title-interval").value = (c.title_interval_ms || 3000) / 1000;
   $("c-debug").checked = !!c.debug;
 }
 
 // ---------- 操作 ----------
-$("save").addEventListener("click", async () => {
+async function saveSettings() {
+  for (const id of ["c-cards", "c-interval", "c-settle", "c-title-interval"]) {
+    if (!$(id).checkValidity()) {$(id).reportValidity(); return false;}
+  }
   const res = await gfetch("/config", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      collection_mode: $("c-mode").value,
       auto_ingest: $("c-auto").checked,
       reingest_interval_min: Number($("c-interval").value),
       cards_target: Number($("c-cards").value),
       spa_settle_ms: Number($("c-settle").value),
+      title_interval_ms: Number($("c-title-interval").value) * 1000,
       debug: $("c-debug").checked,
     }),
   });
   if (res.ok && res.data && res.data.ok) {
+    settingsDirty = false;
     note("设置已保存并生效 ✓");
+    return true;
   } else {
     note("保存失败：" + errorText(res, "未知错误"), true);
+    return false;
   }
-});
+}
+$("save").addEventListener("click", saveSettings);
 
-$("grab").addEventListener("click", () => {
+$("grab").addEventListener("click", async () => {
+  if (!(await saveSettings())) return;
+  $("grab").disabled = true;
+  note("正在开始采集…");
   // 标签页操作集中在背景服务（chrome.tabs.*），弹窗只发固定消息类型
   chrome.runtime.sendMessage({ type: "collect-active" }, (reply) => {
-    if (chrome.runtime.lastError) { note(chrome.runtime.lastError.message, true); return; }
-    if (reply && reply.ok) note("已请求采集当前页（看页面右下角角标）");
-    else note(errorText(reply, "请求失败"), true);
+    refreshProgress();
+    if (chrome.runtime.lastError) {$("grab").disabled = false; note(chrome.runtime.lastError.message, true); return;}
+    if (reply && reply.ok) {
+      if (reply.queued) {note("详情队列已启动，可关闭弹窗；进度自动更新"); return;}
+      $("grab").disabled = false;
+      const stats = reply.title_collection;
+      if (stats && stats.cards) {
+        const missing = stats.cards - stats.captured;
+        note(`本页已入库，全文 ${stats.captured}/${stats.cards}`
+          + (missing ? `；${missing} 张待补齐，请查看页面角标后重采` : ""), missing > 0);
+      } else note("已请求采集当前页（看页面右下角角标）");
+    }
+    else {$("grab").disabled = false; note(errorText(reply, "请求失败"), true);}
   });
 });
 
@@ -250,3 +312,6 @@ $("upd-ext").addEventListener("click", () => {
 checkExtUpdate();
 refresh();
 setInterval(refresh, 3000);
+
+refreshProgress();
+setInterval(refreshProgress, 1000);

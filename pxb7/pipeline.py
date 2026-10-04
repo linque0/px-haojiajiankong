@@ -162,8 +162,11 @@ def build_listings(list_result: C.ListRunResult, keywords: Sequence[X.Keyword]) 
             seen.add(listing_id)
             extraction = X.extract_listing(keywords, listing_id=listing_id,
                                            title=card.title, card_fields=card.fields)
+            if card.hits.get("title") in {"L1-tooltip", "L1-title-api"}:
+                extraction.features["_list_full_title"] = True
             rows.append(ListingRow(listing_id=listing_id, title=card.title, card=card,
-                                   extraction=extraction))
+                                   extraction=extraction,
+                                   favorites_cnt=card.fields.get("favorites_cnt")))
     return rows
 
 
@@ -179,6 +182,43 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
         return stats
 
     ids = [row.listing_id for row in listings]
+
+    # 页内加载更多会重送同一轮列表，保留已由详情回填的属性。
+    for row in listings:
+        previous = conn.execute(
+            "SELECT level, yellow_cnt, five_star_chars, five_star_weapons,"
+            " viewers_masked, favorites_cnt, extracted_features FROM fct_listing_snapshot"
+            " WHERE listing_id = ? AND snapshot_at = ?", [row.listing_id, round_ts]).fetchone()
+        if previous:
+            prior_features = json.loads(previous[6]) if previous[6] else {}
+            keep_full_list = (prior_features.get("_list_full_title")
+                              and not row.extraction.features.get("_list_full_title"))
+            for name, value in zip(("level", "yellow_cnt", "five_star_chars", "five_star_weapons"), previous[:4]):
+                if (keep_full_list or row.card.fields.get(name) is None or name in prior_features.get("_detail_fields", [])) and value is not None:
+                    row.card.fields[name] = value
+            if row.viewers_masked is None:
+                row.viewers_masked = previous[4]
+            if row.favorites_cnt is None:
+                row.favorites_cnt = previous[5]
+            if previous[6]:
+                features = prior_features.copy()
+                features.update(row.extraction.features)
+                if row.extraction.features.get("_list_full_title"):
+                    for roster, scalar in (("five_star_character_chains", "constellation_cnt"),
+                                           ("five_star_weapon_refinements", "five_star_weapon_refined")):
+                        if roster not in row.extraction.features:
+                            features.pop(roster, None)
+                            features.pop(scalar, None)
+                preserved_rosters = set(prior_features.get("_detail_rosters", []))
+                if keep_full_list:
+                    preserved_rosters.update(key for key in
+                        ("five_star_character_chains", "five_star_weapon_refinements") if key in prior_features)
+                for key in preserved_rosters:
+                    features[key] = prior_features[key]
+                    scalar = ("constellation_cnt" if key == "five_star_character_chains"
+                              else "five_star_weapon_refined")
+                    features[scalar] = prior_features[scalar]
+                row.extraction.features = features
 
     # 1) 新 listing 判定（入库前查询）
     flags = db.fetch_listing_flags(conn, ids)
@@ -534,7 +574,9 @@ def run_once(*, settings: Settings, task: Task | None = None, pages: int | None 
              clock=None, notify_result: bool = True) -> PipelineResult:
     """跑一轮（可注入 session/machine/limiter/conn 以便离线测试）。"""
     task = task or load_tasks(settings=settings).by_id("genshin_official")
-    keywords = list(keywords) if keywords is not None else X.seed_keywords()
+    # 词表按任务所属游戏取（docs/02 §4：各游戏画像独立；未建画像的游戏返回空表，
+    # 不用别家词表顶替——与 gateway 的 per-game 口径一致，避免跨游戏命中污染）
+    keywords = list(keywords) if keywords is not None else X.seed_keywords(game_id=task.game_id)
     machine = machine or RiskMachine(settings)
     limiter = limiter or RateLimiter(settings, machine=machine)
     now = clock or _dt.datetime.now
@@ -774,7 +816,8 @@ def _replay_raw_dir_locked(settings: Settings, *, run_dir: str | Path,
     if not run_path.is_dir():
         raise PipelineError(f"raw run 目录不存在：{run_path}")
     task = task or load_tasks(settings=settings).by_id("genshin_official")
-    keywords = list(keywords) if keywords is not None else X.seed_keywords()
+    # 同上：重放也按该任务的游戏画像取词表（跨游戏命中会污染 QC 与看板）
+    keywords = list(keywords) if keywords is not None else X.seed_keywords(game_id=task.game_id)
     owns_conn = conn is None
     db_conn = conn or db.connect(settings.paths.db)
 

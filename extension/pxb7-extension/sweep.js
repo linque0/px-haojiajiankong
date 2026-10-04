@@ -14,7 +14,8 @@
   "use strict";
 
   const DEFAULTS = Object.freeze({
-    minCards: 16,          // 站点一页的天然张数（实测）
+    minCards: 1,
+    defaultCards: 16,      // 默认仍采集一页，可填写任意整数
     maxCards: 200,         // 目标张数上限（12 轮 × 16 ≈ 192）
     maxRounds: 12,         // 加载轮次上限
     maxStalled: 2,         // 连续 N 轮没有新卡片即停（说明没有更多了）
@@ -32,7 +33,7 @@
   /** 目标张数：非法值回落一页（16），上限 200 */
   function clampTarget(value) {
     const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) return DEFAULTS.minCards;
+    if (!Number.isFinite(n) || n <= 0) return DEFAULTS.defaultCards;
     return Math.min(DEFAULTS.maxCards, Math.max(DEFAULTS.minCards, Math.round(n)));
   }
 
@@ -44,6 +45,45 @@
     const byClass = doc.querySelectorAll(".middleCard").length;
     if (byClass > 0) return byClass;
     return doc.querySelectorAll("a[href*='/product/']").length;
+  }
+
+  /** 只选择前 N 个唯一商品；链接直接来自页面，不拼接或猜测详情 URL。 */
+  function selectCards(doc, target, baseUrl) {
+    let cards = Array.from(doc.querySelectorAll(".middleCard[productid]"));
+    if (!cards.length) cards = Array.from(doc.querySelectorAll("[data-listing-id], a[href*='/product/']"));
+    const seen = new Set(), out = [];
+    for (const card of cards) {
+      const link = card.closest("a[href*='/product/']") || card.querySelector("a[href*='/product/']");
+      const href = link && link.getAttribute("href");
+      if (!href) continue;
+      let url;
+      try { url = new URL(href, baseUrl); } catch (_) { continue; }
+      const match = url.pathname.match(/^\/product\/(\d{6,24})(?:\/|$)/);
+      if (url.origin !== "https://www.pxb7.com" || !match) continue;
+      const id = card.getAttribute("productid") || card.getAttribute("data-listing-id") || match[1];
+      if (id !== match[1] || seen.has(id)) continue;
+      seen.add(id);
+      out.push({id, url:url.href, card, node:link || card});
+      if (out.length >= target) break;
+    }
+    return out;
+  }
+
+  /** 在上传副本中标记选中卡片，parser 优先使用语义属性，避免把推荐位/超额卡片入库。 */
+  function capture(doc, selected, titles = {}) {
+    const clone = doc.documentElement.cloneNode(true);
+    for (const node of clone.querySelectorAll("[data-listing-id]")) node.removeAttribute("data-listing-id");
+    const chosen = new Set(selected.map(item => item.id));
+    const refs = selectCards({querySelectorAll:s => clone.querySelectorAll(s)}, 200, "https://www.pxb7.com");
+    for (const item of refs) {
+      if (!chosen.has(item.id)) continue;
+      item.node.setAttribute("data-listing-id", item.id);
+      if (titles[item.id]) {
+        item.card.setAttribute("data-pxb7-full-title", titles[item.id]);
+        item.card.setAttribute("data-pxb7-full-title-id", item.id);
+      }
+    }
+    return clone.outerHTML;
   }
 
   function isDisabled(el) {
@@ -102,7 +142,7 @@
     return moved;
   }
 
-  const api = { DEFAULTS, clampTarget, countCards, findMoreControl, nextAction, scrollForMore };
+  const api = { DEFAULTS, clampTarget, countCards, selectCards, capture, findMoreControl, nextAction, scrollForMore };
   root.PXB7_SWEEP = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

@@ -75,7 +75,9 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "reingest_interval_min": 10,   # 同一 URL 的去重间隔（分钟）
     "spa_settle_ms": 2500,         # SPA 路由切换后的渲染等待
     "debug": False,                # 控制台调试日志
+    "title_interval_ms": 3000,     # 完整标题请求完成后的间隔；与同页去重独立
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
+    "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
     "targets": [],                 # 采集目标：dim_task.task_id 列表；空=只用网关启动任务
     "paths": {},                   # 数据路径自定义：{db|raw_root|runs|log_dir: 绝对路径}
 }
@@ -84,7 +86,9 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "reingest_interval_min": (int, (1, 1440)),
     "spa_settle_ms": (int, (500, 30000)),
     "debug": (bool, None),
-    "cards_target": (int, (16, 200)),   # 上限 200 ≈ 12 轮 × 16 张（内容脚本的轮次上限）
+    "title_interval_ms": (int, (2000, 15000)),
+    "cards_target": (int, (1, 200)),
+    "collection_mode": (str, None),
 }
 _TASK_ID_RE = re.compile(r"[0-9A-Za-z_\-]{1,64}")
 
@@ -269,6 +273,9 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
                     or int(value) != value:
                 raise GatewayError(f"配置 {key} 必须是整数")
             value = int(value)
+        elif expect_type is str:
+            if value not in ("list", "detail"):
+                raise GatewayError("collection_mode 必须是 list 或 detail")
         else:
             if not isinstance(value, bool):
                 raise GatewayError(f"配置 {key} 必须是布尔值")
@@ -471,6 +478,14 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
     listing_id = _extract_listing_id(payload)
     if not listing_id:
         return 400, {"ok": False, "error": "missing-listing-id"}
+    snapshot_at = None
+    if "snapshot_round" in payload:
+        try:
+            snapshot_at = _dt.datetime.fromisoformat(str(payload["snapshot_round"]))
+            if snapshot_at.tzinfo is not None:
+                raise ValueError("only local naive rounds")
+        except (ValueError, TypeError):
+            return 400, {"ok": False, "error": "invalid-snapshot-round"}
 
     game_id, biz_prod = _identify_detail_game(state, listing_id, html)
     if game_id is None:
@@ -482,6 +497,12 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
         return _target_not_selected(state, game_id)
 
     fields = _parse_detail_fields(html)
+    title, attributes = P.parse_detail_attributes(html)
+    extraction = X.extract_listing(X.seed_keywords(game_id=game_id),
+                                   listing_id=listing_id, title=title, card_fields=attributes)
+    extraction.features["_detail_fields"] = list(attributes)
+    extraction.features["_detail_rosters"] = [key for key in
+        ("five_star_character_chains", "five_star_weapon_refinements") if key in extraction.features]
     now = _dt.datetime.now()
     run_id = new_run_id(f"{task.task_id}-plugin", now=now)
     raw_dir = raw_dir_for(state.settings, task.task_id, run_id, now=now)
@@ -489,12 +510,16 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
             "listing_id": listing_id, "task_id": task.task_id, "run_id": run_id,
             "collected_at": now.isoformat(timespec="seconds"), "collected_via": "login",
             "channel": "plugin", "parser_version": P.PARSER_VERSION,
-            "note": "前端 B 采集插件：详情页 M5 字段（零新增 pxb7 请求）", **fields}
+            "snapshot_round": payload.get("snapshot_round"),
+            "note": "前端 B：读取已加载详情 DOM，回填对应列表轮次", **fields}
     _write_raw(raw_dir, f"detail_{listing_id}", html=html, meta=meta)
 
     entry = {"listing_id": listing_id, "viewers_masked": fields["viewers_masked"],
-             "favorites_cnt": fields["favorites_cnt"]}
+             "favorites_cnt": fields["favorites_cnt"], "attributes": attributes,
+             "features": extraction.features, "snapshot_at": snapshot_at}
     updated = _apply_detail(state, entry)
+    if snapshot_at is not None and not updated:
+        return 409, {"ok": False, "error": "snapshot-round-not-found"}
     state.note(details_stored=state.stats["details_stored"] + 1)
     state.record_batch(kind="detail", run_id=run_id, listing_id=listing_id,
                        task_id=task.task_id, game_id=game_id,
@@ -506,6 +531,10 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
            "viewers_visible": fields["viewers_visible"],
            "viewers_mask_detected": fields["viewers_mask_detected"],
            "favorites_cnt": fields["favorites_cnt"],
+           "attributes": attributes,
+           "weapon_details_complete": (bool(attributes.get("five_star_weapons"))
+                                       and len(extraction.features.get("five_star_weapon_refinements") or [])
+                                       == attributes.get("five_star_weapons")),
            "snapshot_rows_updated": updated}
     if not updated:
         ack["pending"] = ("尚无该 listing 的快照行，详情字段已暂存，"
@@ -521,10 +550,12 @@ def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
             updated = db.update_detail_fields(
                 conn, entry["listing_id"],
                 viewers_masked=entry.get("viewers_masked"),
-                favorites_cnt=entry.get("favorites_cnt"))
+                favorites_cnt=entry.get("favorites_cnt"),
+                attributes=entry.get("attributes"), features=entry.get("features"),
+                snapshot_at=entry.get("snapshot_at"))
         finally:
             conn.close()
-    if not updated:
+    if not updated and entry.get("snapshot_at") is None:
         state.pending_details[entry["listing_id"]] = entry
     return updated
 
@@ -591,6 +622,39 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                     "加载更多（等效用户手动滚动），不请求站外接口"}
     if sweep:
         meta["sweep"] = sweep
+    expansion = payload.get("title_expansion")
+    if isinstance(expansion, dict):
+        safe_expansion = {key: _safe_int(expansion.get(key), default=0, lo=0, hi=200)
+                          for key in ("cards", "captured", "hovered", "failed")}
+        meta["title_expansion"] = safe_expansion
+        meta["note"] = "前端 B：列表页悬浮展开公开完整标题；站点可触发自身标题请求，不导航详情"
+    collection = payload.get("title_collection")
+    if isinstance(collection, dict):
+        safe_collection = {key: _safe_int(collection.get(key), default=0, lo=0,
+                                        hi=800 if key == "attempts" else 400 if key == "requested" else 200)
+                           for key in ("cards", "captured", "requested", "failed", "attempts", "retried")}
+        stop = collection.get("stop")
+        if isinstance(stop, str) and re.fullmatch(r"[a-z\-]{1,32}", stop):
+            safe_collection["stop"] = stop
+        safe_errors = []
+        for entry in (collection.get("errors") or [])[:200] if isinstance(collection.get("errors"), list) else []:
+            if not isinstance(entry, dict):
+                continue
+            listing_id, error = entry.get("id"), entry.get("error")
+            if not isinstance(listing_id, str) or not re.fullmatch(r"\d{6,24}", listing_id):
+                continue
+            if not isinstance(error, str) or not re.fullmatch(r"[a-z\-]{1,32}", error):
+                continue
+            item = {"id": listing_id, "error": error,
+                    "attempts": _safe_int(entry.get("attempts"), default=0, lo=0, hi=10)}
+            if entry.get("status"):
+                item["status"] = _safe_int(entry["status"], default=0, lo=100, hi=599)
+            safe_errors.append(item)
+        safe_collection["errors"] = safe_errors
+        if collection.get("interval_ms") is not None:
+            safe_collection["interval_ms"] = _safe_int(collection["interval_ms"], default=3000, lo=2000, hi=15000)
+        meta["title_collection"] = safe_collection
+        meta["note"] = "前端 B：复用列表响应，按商品编号串行获取公开完整标题；不触发悬浮、不导航详情"
     dump = _write_raw(raw_dir, f"list_p{page_no:02d}", html=html, meta=meta)
 
     parsed = P.parse_list_page(html, url=url, parser_version=state.settings.parser_version)
@@ -611,7 +675,10 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
         detail = state.pending_details.pop(row.listing_id, None)
         if detail:
             row.viewers_masked = detail.get("viewers_masked")
-            row.favorites_cnt = detail.get("favorites_cnt")
+            if detail.get("favorites_cnt") is not None:
+                row.favorites_cnt = detail["favorites_cnt"]
+            row.card.fields.update(detail.get("attributes") or {})
+            row.extraction.features.update(detail.get("features") or {})
             merged_details += 1
 
     try:
@@ -727,6 +794,212 @@ def targets_payload(state: GatewayState) -> dict[str, Any]:
             "mode": state.targets_mode(), "default_task": default_id,
             "games": [t.game_id for t in state.effective_tasks()],
             "note": "只采集勾选目标的游戏页面；未勾选任何目标时使用网关启动任务"}
+
+
+# --------------------------------------------------------------------------- #
+# 入库数据浏览（看板「数据浏览」：按游戏换列名 + 翻页）
+# --------------------------------------------------------------------------- #
+# 列名用**该游戏自己的词表说法**（docs/02 §4 各游戏词表 + config/keywords_seed.yaml 画像）：
+#   取值方式 "col:xxx" = 直接读 fct_listing_snapshot 列；"feat:xxx" = 读 extracted_features JSON。
+# 规则：哪种说法在该游戏不成立就不列该列（宁可少列，不拿别家术语硬套）。
+_GAME_COLUMNS: dict[int, tuple[tuple[str, str, str], ...]] = {
+    10026: (   # 原神（docs/02 §4.A1：黄数/五星角色/专武精炼/原石/纠缠之源…）
+        ("level", "等级", "col:level"),
+        ("yellow_cnt", "黄数", "col:yellow_cnt"),
+        ("five_star_chars", "五星角色", "col:five_star_chars"),
+        ("five_star_weapons", "五星武器", "col:five_star_weapons"),
+        ("constellation_cnt", "角色命座", "feat:constellation_cnt"),
+        ("five_star_weapon_refined", "武器精炼（精N）", "feat:five_star_weapon_refined"),
+        ("primogems", "原石", "col:primogems"),
+        ("intertwined_fate", "纠缠之源", "col:intertwined_fate"),
+        ("artifacts", "圣遗物", "col:artifacts"),
+        ("skins", "时装", "col:skins"),
+        ("server", "区服", "col:server"),
+        ("mail_status", "邮箱", "col:mail_status"),
+    ),
+    10302: (   # 鸣潮（docs/02 §4.A4 + 站内实样 MVNGK0804：N命/精N 记法）
+        ("level", "等级", "col:level"),
+        ("yellow_cnt", "黄数", "col:yellow_cnt"),
+        ("five_star_chars", "五星角色", "col:five_star_chars"),
+        ("five_star_weapons", "五星武器", "col:five_star_weapons"),
+        ("constellation_cnt", "共鸣链（N命）", "feat:constellation_cnt"),
+        ("five_star_weapon_refined", "武器精炼（精N）", "feat:five_star_weapon_refined"),
+        ("resources", "资源", "feat:wuwa_resources"),
+        ("paid_items", "额外付费商品", "feat:wuwa_paid_items"),
+        ("server", "区服", "col:server"),
+        ("mail_status", "邮箱", "col:mail_status"),
+    ),
+    10032: (   # 火影忍者（docs/02 §4.F：绝版点券 S 忍等词条待建画像，先列已抽到的通用列）
+        ("level", "等级", "col:level"),
+        ("skins", "时装", "col:skins"),
+        ("server", "区服", "col:server"),
+        ("mail_status", "邮箱", "col:mail_status"),
+    ),
+    10371: (   # 三角洲行动（docs/02 §4.B：红皮/武器皮肤类目/烽火段位/货币；资产类只记命中不入列）
+        ("level", "等级", "col:level"),
+        ("delta_fenghuo_level_cnt", "烽火等级", "feat:delta_fenghuo_level_cnt"),
+        ("delta_battlefield_level_cnt", "战场等级", "feat:delta_battlefield_level_cnt"),
+        ("delta_battlepass_level_cnt", "通行证等级", "feat:delta_battlepass_level_cnt"),
+        ("delta_red_skin_cnt", "红皮/大红", "feat:delta_red_skin_cnt"),
+        ("delta_legendary_weapon_cnt", "传说武器", "feat:delta_legendary_weapon_cnt"),
+        ("delta_epic_weapon_cnt", "史诗武器", "feat:delta_epic_weapon_cnt"),
+        ("delta_weapon_skin_cnt", "武器皮肤", "feat:delta_weapon_skin_cnt"),
+        ("delta_operator_skin_cnt", "干员皮肤", "feat:delta_operator_skin_cnt"),
+        ("delta_melee_skin_cnt", "近战皮肤", "feat:delta_melee_skin_cnt"),
+        ("delta_knife_skin_cnt", "刀皮", "feat:delta_knife_skin_cnt"),
+        ("delta_charm_cnt", "挂饰", "feat:delta_charm_cnt"),
+        ("delta_vehicle_cnt", "载具", "feat:delta_vehicle_cnt"),
+        ("delta_bundle_cnt", "捆绑包", "feat:delta_bundle_cnt"),
+        ("delta_triangle_coin_cnt", "三角币", "feat:delta_triangle_coin_cnt"),
+        ("delta_mandela_coin_cnt", "曼德尔币", "feat:delta_mandela_coin_cnt"),
+        ("delta_triangle_coupon_cnt", "三角券", "feat:delta_triangle_coupon_cnt"),
+        ("delta_service_recall_flag", "找回包赔", "feat:delta_service_recall_flag"),
+        ("delta_second_realname_flag", "可二次实名", "feat:delta_second_realname_flag"),
+        ("delta_no_second_realname_flag", "实名受限（不可二次）", "feat:delta_no_second_realname_flag"),
+        ("server", "区服", "col:server"),
+    ),
+}
+_GENERIC_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("level", "等级", "col:level"),
+    ("yellow_cnt", "黄数", "col:yellow_cnt"),
+    ("server", "区服", "col:server"),
+    ("mail_status", "邮箱", "col:mail_status"),
+)
+
+LISTINGS_PAGE_DEFAULT = 15
+LISTINGS_PAGE_MAX = 200
+WUWA_RESOURCES = (
+    ("astrite_cnt", "星声"),
+    ("lunite_cnt", "月相"),
+    ("afterglow_coral_cnt", "余波珊瑚"),
+    ("lustrous_tide_cnt", "浮金波纹"),
+    ("radiant_tide_cnt", "铸潮波纹"),
+)
+
+
+def columns_for_game(game_id: int | None) -> tuple[tuple[str, str, str], ...]:
+    """该游戏的数据列定义；未注册的游戏用通用列（不硬套别家术语）。"""
+    if game_id is None:
+        return _GENERIC_COLUMNS
+    return _GAME_COLUMNS.get(int(game_id), _GENERIC_COLUMNS)
+
+
+def _columns_payload(columns: Sequence[tuple[str, str, str]]) -> list[dict[str, str]]:
+    return [{"key": key, "label": label, "source": source.split(":", 1)[0]}
+            for key, label, source in columns]
+
+
+def _parse_features(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, Any]:
+    """入库数据分页查询（看板「数据浏览」）：`offset` / `limit` / `game_id`。
+
+    只读、离线；参数非法即回落（limit 10–200、offset ≥0、game_id 未注册按全部）。
+    列名按所选游戏取该游戏自己的说法，取值来源在 columns[].source 里如实标注
+    （col=快照列 / feat=extracted_features 特征）。
+    """
+    def single(key: str, default: str = "") -> str:
+        value = query.get(key)
+        if isinstance(value, (list, tuple)):
+            return str(value[0]) if value else default
+        return str(value if value is not None else default)
+
+    offset = _safe_int(single("offset", "0"), default=0, lo=0, hi=10_000_000)
+    limit = _safe_int(single("limit", str(LISTINGS_PAGE_DEFAULT)),
+                      default=LISTINGS_PAGE_DEFAULT, lo=10, hi=LISTINGS_PAGE_MAX)
+    raw_game = _safe_int(single("game_id", "0"), default=0, lo=0, hi=2_000_000_000_000)
+    game_id = raw_game or None
+    columns = (*columns_for_game(game_id), ("published_at", "商品发布时间", "col:publish_time_text"))
+
+    col_names = sorted({source.split(":", 1)[1] for _, _, source in columns
+                        if source.startswith("col:")})
+    select_cols = "".join(f" s.{name}," for name in col_names)
+    where, params = "", []
+    if game_id is not None:
+        where, params = " WHERE l.game_id = ?", [game_id]
+
+    base = (" FROM fct_listing_snapshot s"
+            " JOIN dim_listing l ON l.listing_id = s.listing_id"
+            " LEFT JOIN dim_game g ON g.game_id = l.game_id")
+
+    payload: dict[str, Any] = {"ok": True, "offset": offset, "limit": limit,
+                               "game_id": game_id, "columns": _columns_payload(columns)}
+    try:
+        conn = db.connect(state.settings.paths.db, read_only=True)
+        try:
+            total = conn.execute(f"SELECT count(*){base}{where}", params).fetchone()[0]
+            mail_count, viewer_count, publish_count = conn.execute(
+                "SELECT count(NULLIF(trim(s.mail_status), '')), count(s.viewers_masked),"
+                f" count(NULLIF(trim(s.publish_time_text), '')){base}{where}", params).fetchone()
+            columns = tuple(column for column in columns
+                            if not (column[0] == "mail_status" and not mail_count)
+                            and not (column[0] == "published_at" and not publish_count))
+            payload["columns"] = _columns_payload(columns)
+            payload["show_viewers"] = bool(viewer_count)
+            games = [{"game_id": int(r[0]), "game_name": r[1] or str(r[0]), "rows": r[2]}
+                     for r in conn.execute(
+                         "SELECT l.game_id, max(g.game_name), count(*)"
+                         f"{base} GROUP BY l.game_id ORDER BY count(*) DESC").fetchall()]
+            rows = conn.execute(
+                "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.viewers_masked,"
+                " s.favorites_cnt, s.extracted_features, l.game_id, g.game_name,"
+                f"{select_cols.rstrip(',')}{base}{where}"
+                " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset]).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:                  # 库不可用不拖垮看板
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        payload["rows"], payload["total"], payload["games"] = [], 0, []
+        return payload
+
+    out_rows: list[dict[str, Any]] = []
+    for row in rows:
+        listing_id, snapshot_at, price, viewers, favorites, features_raw, gid, gname = row[:8]
+        col_values = dict(zip(col_names, row[8:]))
+        features = _parse_features(features_raw)
+        cells: dict[str, Any] = {}
+        for key, _label, source in columns:
+            kind, name = source.split(":", 1)
+            value = col_values.get(name) if kind == "col" else features.get(name)
+            if name == "wuwa_resources":
+                resources = [{"name": label, "value": features.get(feature)}
+                             for feature, label in WUWA_RESOURCES]
+                value = resources if any(item["value"] is not None for item in resources) else None
+            if name == "wuwa_paid_items":
+                paid_items = [{"name": label, "value": "、".join(features[feature]) if features.get(feature) else None}
+                              for feature, label in X.WUWA_PAID_ITEMS]
+                value = paid_items if any(item["value"] is not None for item in paid_items) else None
+            roster_key = {"constellation_cnt": "five_star_character_chains",
+                          "five_star_weapon_refined": "five_star_weapon_refinements"}.get(name)
+            if roster_key and features.get(roster_key):
+                value = features[roster_key]
+            if value is None and kind == "col":
+                fallback = {"level": "account_level_cnt", "five_star_chars": "five_star_chars_cnt",
+                            "five_star_weapons": "five_star_weapons_cnt", "yellow_cnt": "yellow_cnt"}.get(name)
+                value = features.get(fallback) if fallback else None
+            if hasattr(value, "isoformat"):
+                value = value.isoformat(timespec="seconds")
+            cells[key] = value
+        out_rows.append({
+            "listing_id": listing_id,
+            "round": snapshot_at.isoformat(timespec="minutes") if snapshot_at else None,
+            "price": float(price) if price is not None else None,
+            "viewers": viewers, "favorites": favorites,
+            "game_id": int(gid) if gid is not None else None,
+            "game_name": gname or (str(gid) if gid is not None else "—"),
+            "cells": cells,
+        })
+    payload.update({"total": total, "games": games, "rows": out_rows})
+    return payload
 
 
 def paths_payload(state: GatewayState) -> dict[str, Any]:
@@ -860,6 +1133,20 @@ def _risk_summary(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _group_keywords_by_game(rows: Sequence[Any], *, per_game_limit: int = 10
+                            ) -> dict[str, Any]:
+    """把「game_id, 游戏名, 关键词, 命中数」明细按游戏分组（每组取前 N 条）。"""
+    grouped: dict[str, Any] = {}
+    for game_id, game_name, keyword, hits in rows:
+        key = str(game_id)
+        entry = grouped.setdefault(key, {"game_id": game_id,
+                                         "game_name": game_name or str(game_id),
+                                         "top": []})
+        if len(entry["top"]) < per_game_limit:
+            entry["top"].append({"keyword": keyword, "hits": hits})
+    return grouped
+
+
 def build_stats_payload(state: GatewayState) -> dict[str, Any]:
     """看板 /stats 聚合：网关实时状态 + 插件配置 + DB 聚合 + 风控状态（只读，全离线）。"""
     with state.lock:
@@ -886,6 +1173,14 @@ def build_stats_payload(state: GatewayState) -> dict[str, Any]:
                 "SELECT k.keyword, count(*) AS hits FROM fct_listing_keyword f"
                 " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
                 " GROUP BY 1 ORDER BY hits DESC LIMIT 10").fetchall()
+            # 词表命中按游戏分组（看板按所选游戏展示该游戏自己的词条，不混算别家）
+            keywords_by_game = conn.execute(
+                "SELECT l.game_id, g.game_name, k.keyword, count(*) AS hits"
+                " FROM fct_listing_keyword f"
+                " JOIN dim_listing l ON l.listing_id = f.listing_id"
+                " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
+                " LEFT JOIN dim_game g ON g.game_id = l.game_id"
+                " GROUP BY 1, 2, 3 ORDER BY hits DESC").fetchall()
             latest_listings = conn.execute(
                 "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.level, s.yellow_cnt,"
                 " s.server, s.mail_status, s.viewers_masked, s.favorites_cnt,"
@@ -911,6 +1206,7 @@ def build_stats_payload(state: GatewayState) -> dict[str, Any]:
                         "listings": r[2]} for r in rounds],
             "price_histogram": [{"bucket": (r[0] or 0) * 200, "count": r[1]} for r in hist],
             "top_keywords": [{"keyword": r[0], "hits": r[1]} for r in top_keywords],
+            "top_keywords_by_game": _group_keywords_by_game(keywords_by_game),
             "latest_listings": [{
                 "listing_id": r[0], "round": r[1].isoformat(timespec="minutes"),
                 "price": float(r[2]) if r[2] is not None else None,
@@ -1011,6 +1307,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                                  "script": script_info(self.state)})
         elif path == "/stats":
             self._send(200, build_stats_payload(self.state))
+        elif path == "/listings":
+            query = parse_qs(urlsplit(self.path).query)
+            self._send(200, handle_listings(self.state, query))
         elif path == "/status":
             self._send(200, handle_status(self.state))
         else:

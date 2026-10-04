@@ -113,12 +113,13 @@ FIELD_SPECS: dict[str, tuple[Strategy, ...]] = {
     ),
     "level": (
         _css("L1-class", "[class*='level'], [class*='Level'], [class*='grade']", note="等级类名"),
-        _re("L2-text", r"(?:冒险等级|等级|Lv\.?|LV)\s*[:：]?\s*(\d{1,3})", note="『等级 60』"),
+        _re("L2-text", r"(?:冒险等级|联觉等级|等级|Lv\.?|LV)\s*[:：]?\s*(\d{1,3})(?!\d)", note="『等级 60』"),
+        _re("L3-text", r"(?<!\d)(\d{1,3})\s*级", note="『80级』"),
     ),
     "yellow_cnt": (
         _css("L1-attr", "[data-yellow], [class*='yellow'], [class*='Yellow']", note="黄数类名/属性"),
         _re("L2-text", r"黄数\s*[:：]?\s*(\d{1,4})", note="『黄数 12』"),
-        _re("L3-text", r"(\d{1,4})\s*黄", note="『12黄』兜底"),
+        _re("L3-text", r"(?<!\d)(\d{1,4})\s*黄(?!数)", note="『12黄』兜底"),
     ),
     "mc_gender": (
         _css("L1-class", "[class*='gender'], [class*='Gender'], [class*='sex']", note="性别类名"),
@@ -127,14 +128,14 @@ FIELD_SPECS: dict[str, tuple[Strategy, ...]] = {
     "five_star_chars": (
         _css("L1-class", "[class*='five-star-char'], [class*='fiveStarChar'], [class*='star-char']",
              note="五星角色类名"),
-        _re("L2-text", r"五星角色\s*[:：]?\s*(\d{1,3})", note="『五星角色 12』"),
-        _re("L3-text", r"(\d{1,3})\s*个?\s*五星角色", note="『12个五星角色』兜底"),
+        _re("L2-text", r"五星角色(?:数量)?\s*[:：]?\s*(\d{1,3})(?!\d|\s*(?:命|链|个\s*(?:五星|四星)))", note="『五星角色 12』"),
+        _re("L3-text", r"(?<!\d)(\d{1,3})\s*个?\s*五星角色(?!\s*\d)", note="『12个五星角色』兜底"),
     ),
     "five_star_weapons": (
         _css("L1-class", "[class*='five-star-weapon'], [class*='fiveStarWeapon'], [class*='star-weapon']",
              note="五星武器类名"),
-        _re("L2-text", r"五星武器\s*[:：]?\s*(\d{1,3})", note="『五星武器 5』"),
-        _re("L3-text", r"(\d{1,3})\s*个?\s*五星武器", note="兜底"),
+        _re("L2-text", r"五星武器(?:数量)?\s*[:：]?\s*(\d{1,3})(?!\d|\s*(?:精|阶|个\s*(?:五星|四星)))", note="『五星武器 5』"),
+        _re("L3-text", r"(?<!\d)(\d{1,3})\s*个?\s*五星武器(?!\s*\d)", note="兜底"),
     ),
     "intertwined_fate": (
         _css("L1-class", "[class*='intertwined'], [class*='fate']", note="纠缠之源类名"),
@@ -219,6 +220,10 @@ FIELD_SPECS: dict[str, tuple[Strategy, ...]] = {
 
 # 契约外的必要字段：listing_id（入库主键）、title（词表抽取输入）
 EXTRA_SPECS: dict[str, tuple[Strategy, ...]] = {
+    "favorites_cnt": (
+        _css("L1-attr", "[collectcount]", attr="collectcount"),
+        _re("L2-text", r"(\d{1,6})\s*人已收藏"),
+    ),
     "listing_id": (
         _css("L1-attr", "[productid]", attr="productid", note="middleCard productid（校准）"),
         _css("L1-attr", "[data-listing-id]", attr="data-listing-id", note="语义属性"),
@@ -229,6 +234,8 @@ EXTRA_SPECS: dict[str, tuple[Strategy, ...]] = {
     "title": (
         _css("L1-attr", "[productname]", attr="productname", max_len=None,
              note="smallCardTitle productname（站点完整标题，校准）"),
+        _css("L1-title", ".smallCardTitle", max_len=None,
+             note="卡片标题全文；没有 productname 属性时不再裁成80字"),
         _css("L1-class", "[class*='title'], [class*='Title'], [class*='name'], h3, h4",
              note="标题类名"),
         _re("L2-text", r"([^\n]{6,80})", note="首行文本兜底"),
@@ -413,6 +420,7 @@ _CONVERTERS = {
     "artifacts": _to_int,
     "skins": _to_int,
     "img_cnt": _to_int,
+    "favorites_cnt": _to_int,
     "has_compensation": _to_bool,
     "official_verified": _to_bool,
     "featured_chars": _to_list,
@@ -451,11 +459,11 @@ def _extract(card: Tag, field: str, strategies: Sequence[Strategy],
                 raw = raw.strip()
                 if st.attr is None and st.max_len is not None and len(raw) > st.max_len:
                     continue          # 命中的是外层容器（噪声），换下一个节点/策略
-            value = _convert(field, raw)
-            if value is not None:
-                if st.scale != 1.0 and isinstance(value, (int, float)):
-                    value = round(value * st.scale, 2)   # 如 price 属性单位为分（×0.01）
-                return FieldValue(value, st.name, raw)
+                value = _convert(field, raw)
+                if value is not None:
+                    if st.scale != 1.0 and isinstance(value, (int, float)):
+                        value = round(value * st.scale, 2)
+                    return FieldValue(value, st.name, raw)
         elif st.kind == "regex":
             if not st.pattern:
                 continue
@@ -538,7 +546,8 @@ def _pick_cards(soup: BeautifulSoup) -> tuple[list[Tag], str | None]:
 # --------------------------------------------------------------------------- #
 # 对外接口
 # --------------------------------------------------------------------------- #
-def parse_card(card: Tag | str, *, parser_version: str = PARSER_VERSION) -> ParsedCard:
+def parse_card(card: Tag | str, *, parser_version: str = PARSER_VERSION,
+               full_title: str | None = None, full_title_source: str = "L1-tooltip") -> ParsedCard:
     """解析单张卡片（Tag 或 HTML 字符串）。任何字段失败都不抛异常。"""
     if isinstance(card, str):
         soup = BeautifulSoup(sanitize_dom_text(card), "html.parser")
@@ -547,6 +556,8 @@ def parse_card(card: Tag | str, *, parser_version: str = PARSER_VERSION) -> Pars
     else:
         node = card
     card_text = node.get_text(" ", strip=True)
+    if full_title:
+        card_text = full_title + " " + card_text
     fields: dict[str, Any] = {}
     hits: dict[str, str] = {}
     for name, strategies in FIELD_SPECS.items():
@@ -560,6 +571,11 @@ def parse_card(card: Tag | str, *, parser_version: str = PARSER_VERSION) -> Pars
         if hit is not None:
             extra[name] = hit.value
             hits[name] = hit.strategy
+    if "favorites_cnt" in extra:
+        fields["favorites_cnt"] = extra["favorites_cnt"]
+    if full_title:
+        extra["title"] = full_title
+        hits["title"] = full_title_source
     if isinstance(extra.get("listing_id"), str):
         m = re.search(r"(\d{3,})", extra["listing_id"])
         extra["listing_id"] = m.group(1) if m else None
@@ -598,16 +614,55 @@ def parse_list_page(html: str, *, url: str | None = None,
                     parser_version: str = PARSER_VERSION) -> PageParseResult:
     """解析列表页 HTML：逐卡片解析 + 字段命中/缺失统计；单卡失败不中断。"""
     soup = BeautifulSoup(sanitize_dom_text(html or ""), "html.parser")
+    # TDesign 将悬浮文案挂到卡片之外，关闭后 display:none，但已取得的公开全文仍在 DOM。
+    # 只保留这一种标题节点；优惠券及其他隐藏内容仍按原规则剔除。
+    popup_titles = [node.get_text("", strip=True) for node in
+                    soup.select(".t-popup .longTitle > div:not(.more)")]
     prune_hidden(soup)
     nodes, selector = _pick_cards(soup)
+    def normalized(text: str) -> str:
+        return "".join(c for c in text if c.isalnum())
+    prefixes = []
+    for node in nodes:
+        hit = _extract(node, "title", EXTRA_SPECS["title"])
+        prefixes.append(normalized(hit.value) if hit else "")
+    full_titles: dict[int, str] = {}
+    full_sources: dict[int, str] = {}
+    for title in popup_titles:
+        normalized_title = normalized(title)
+        matches = [index for index, prefix in enumerate(prefixes)
+                   if len(prefix) >= 24 and normalized_title.startswith(prefix)]
+        if len(matches) == 1:
+            index = matches[0]
+            previous = full_titles.get(index)
+            if previous is None or normalized(previous) == normalized_title:
+                full_titles[index] = title
+            else:
+                full_titles[index] = ""  # 同前缀但有冲突全文，拒绝猜测。
+    # v0.4.4 将直接获取的公开全文写在上传 DOM 副本，不依赖悬浮节点。
+    # ID 和原短标题双校验；价格/收藏/发布时间仍取原卡片，全文只补账号字段。
+    for index, node in enumerate(nodes):
+        id_hit = _extract(node, "listing_id", EXTRA_SPECS["listing_id"])
+        candidates = ([node] if node.has_attr("data-pxb7-full-title") else []) + list(node.select("[data-pxb7-full-title]"))
+        valid = set()
+        for candidate in candidates:
+            title = candidate.get("data-pxb7-full-title", "")
+            if (id_hit and str(id_hit.value) == candidate.get("data-pxb7-full-title-id")
+                    and isinstance(title, str) and 0 < len(title) <= 50000
+                    and len(prefixes[index]) >= 24 and normalized(title).startswith(prefixes[index])):
+                valid.add(title)
+        if len(valid) == 1:
+            full_titles[index] = valid.pop()
+            full_sources[index] = "L1-title-api"
     cards: list[ParsedCard] = []
     field_hits = {f: 0 for f in CONTRACT_FIELDS}
     field_missing = {f: 0 for f in CONTRACT_FIELDS}
     field_samples: dict[str, list[dict[str, Any]]] = {f: [] for f in CONTRACT_FIELDS}
 
-    for node in nodes:
+    for index, node in enumerate(nodes):
         try:
-            parsed = parse_card(node, parser_version=parser_version)
+            parsed = parse_card(node, parser_version=parser_version, full_title=full_titles.get(index),
+                                full_title_source=full_sources.get(index, "L1-tooltip"))
         except Exception as exc:                      # 单卡异常不中断整轮
             parsed = ParsedCard(listing_id=None, title=None, parse_ok=False,
                                 fail_reason=f"card-exception:{type(exc).__name__}",
@@ -656,3 +711,30 @@ def describe_selectors() -> dict[str, Any]:
         "fields": {name: [st.name for st in specs] for name, specs in FIELD_SPECS.items()},
         "extra": {name: [st.name for st in specs] for name, specs in EXTRA_SPECS.items()},
     }
+
+
+def parse_detail_attributes(html: str) -> tuple[str | None, dict[str, Any]]:
+    """只解析当前商品，剔除推荐卡片；逐字 span 标题拼回完整文字。"""
+    soup = BeautifulSoup(sanitize_dom_text(html), "html.parser")
+    prune_hidden(soup)
+    for node in soup.select("script, style, noscript, .smallCard, .middleCard, [productid]"):
+        node.decompose()
+    root = soup.select_one(".product-detail") or soup
+    title_node = root.select_one("[data-product-title], .product-title, .line-clamp-5, h1")
+    title = title_node.get_text("", strip=True) if title_node else None
+    text = root.get_text(" ", strip=True)
+    values: dict[str, Any] = {}
+    for name in ("level", "yellow_cnt", "five_star_chars", "five_star_weapons"):
+        strategies = tuple(st for st in FIELD_SPECS[name] if st.kind == "regex")
+        if name == "level":
+            # 详情有角色/武器 Lv.90，不能当作账号等级。
+            strategies = (_re("detail-account-level", r"(?:冒险等级|联觉等级|账号等级|等级)\s*[:：]?\s*(\d{1,3})(?!\d)"),)
+        hit = _extract(root, name, strategies, title or "")
+        if hit is None and title:
+            hit = _extract(root, name, tuple(st for st in FIELD_SPECS[name]
+                                           if st.kind == "regex" and st.name == "L3-text"), title)
+        if hit is None:
+            hit = _extract(root, name, strategies, text)
+        if hit is not None:
+            values[name] = hit.value
+    return title, values

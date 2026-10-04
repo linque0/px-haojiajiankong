@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pxb7 import config as cfg  # noqa: E402
 from pxb7 import db  # noqa: E402
+from pxb7 import extract as X  # noqa: E402
 from pxb7 import gateway as G  # noqa: E402
 
 REAL_LIST_HTML = (PROJECT_ROOT / "tests" / "fixtures" / "real_card_pxb7_20261003.html"
@@ -47,6 +48,8 @@ def settings(tmp_path: Path) -> cfg.Settings:
 @pytest.fixture()
 def state(settings: cfg.Settings) -> G.GatewayState:
     db.init_db(settings.paths.db)
+    with db.connect(settings.paths.db) as conn:      # 与 init-db 一致：词表种子入库
+        db.upsert_dim_keywords(conn, X.seed_db_rows())
     tasks = cfg.load_tasks(settings=settings)
     return G.GatewayState(settings, tasks.tasks, default_task_id="genshin_official")
 
@@ -137,6 +140,109 @@ def test_ingest_records_page_no_and_sweep(state: G.GatewayState,
     bad = _post(state, "/ingest/cards", {**CARDS_PAYLOAD, "page_no": "x",
                                          "sweep": {"target": "big"}})[1]
     assert bad["ok"] and bad["page_no"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# 数据浏览（/listings：按游戏换列名 + 翻页）
+# --------------------------------------------------------------------------- #
+def test_listings_pagination_and_per_game_columns(state: G.GatewayState) -> None:
+    """列名用该游戏自己的词表说法；翻页由 offset/limit 控制（不再固定最近 15 条）。"""
+    for page in (1, 2):
+        status, res = _post(state, "/ingest/cards",
+                            {**CARDS_PAYLOAD,
+                             "url": f"https://www.pxb7.com/buy/10026/1?page={page}"})
+        assert status == 200 and res["ok"]
+    page1 = G.handle_listings(state, {"limit": ["2"], "offset": ["0"], "game_id": ["10026"]})
+    page2 = G.handle_listings(state, {"limit": ["2"], "offset": ["2"], "game_id": ["10026"]})
+    assert page1["ok"] and page1["total"] == 2 and len(page1["rows"]) == 2
+    assert page1["rows"][0]["game_name"] == "原神"
+    # 夹具只有 2 个 listing：第 1 页 2 条，第 2 页应为空（总数以 count 为准）
+    assert page2["rows"] == []
+    assert [c["label"] for c in page1["columns"]][:4] == ["等级", "黄数", "五星角色", "五星武器"]
+    labels = [c["label"] for c in page1["columns"]]
+    assert "原石" in labels and "纠缠之源" in labels
+    assert "共鸣链（N命）" not in labels, "原神视图不得出现鸣潮术语"
+    assert all(r["cells"] for r in page1["rows"]), "每行都要带该游戏的列值"
+    # 不筛游戏（全部）时用通用列，避免把某一家的术语硬套到别家行上
+    generic = G.handle_listings(state, {"limit": ["15"], "offset": ["0"]})
+    assert [c["label"] for c in generic["columns"]] == ["等级", "黄数", "区服", "邮箱", "商品发布时间"]
+
+
+def test_listings_game_filter_switches_vocabulary(state: G.GatewayState) -> None:
+    """切到鸣潮：列名换成鸣潮词表说法（共鸣链/精N），且只返回该游戏的行。"""
+    G.handle_config_post(state, {"targets": ["genshin_official", "wuwa_official"]})
+    assert _post(state, "/ingest/cards", CARDS_PAYLOAD)[0] == 200
+    assert _post(state, "/ingest/cards",
+                 {"url": "https://www.pxb7.com/buy/10302/1", "html": REAL_LIST_HTML})[0] == 200
+    view = G.handle_listings(state, {"game_id": ["10302"]})
+    labels = [c["label"] for c in view["columns"]]
+    assert "共鸣链（N命）" in labels and "武器精炼（精N）" in labels
+    assert "原石" not in labels and "纠缠之源" not in labels, "鸣潮视图不得出现原神术语"
+    assert {c["source"] for c in view["columns"] if c["label"].startswith(("共鸣链", "武器精炼"))} \
+        == {"feat"}, "鸣潮命座/精炼来自抽取特征，来源需如实标注"
+    assert view["total"] == 2 and all(r["game_id"] == 10302 for r in view["rows"])
+
+
+def test_delta_view_uses_delta_vocabulary_and_features(state: G.GatewayState) -> None:
+    """三角洲（docs/02 §4.B）：列名用 delta 画像说法，取值走 feat:extracted_features。"""
+    G.handle_config_post(state, {"targets": ["genshin_official", "delta_official"]})
+    listing_id = "2429000000000000001"
+    list_html = (
+        "<html><body><ul>"
+        f"<a href=\"/product/{listing_id}/1\"><div class=\"middleCard\""
+        f" productid=\"{listing_id}\" bizprod=\"1\" status=\"1\" h5imgcount=\"10\""
+        " createtime=\"2026-10-03 10:00:00\" verifiedseller=\"0\" producttype=\"1\">"
+        "<div class=\"info\"><div class=\"t-space-item\"><div class=\"smallCardTitle\""
+        " attrnamelist=\"steam国服\" gameid=\"10371\" gamename=\"三角洲行动\" price=\"18000\""
+        " productname=\"三角洲行动 总资产：57.4M，哈夫币：100W，烽火60级：钻石，战场50级：上等兵\">"
+        "三角洲行动 | steam国服</div></div></div></div></a></ul></body></html>")
+    assert _post(state, "/ingest/cards",
+                 {"url": "https://www.pxb7.com/buy/10371/1", "html": list_html})[0] == 200
+    detail_html = (
+        "<html><body><a href=\"/buy/10371/1\">三角洲行动</a>"
+        "<div class=\"product-detail\"><h1>总资产：57.4M，哈夫币：100W，传说武器30，史诗武器47，"
+        "烽火60级：钻石，战场50级：上等兵【干员皮肤5】露娜黑天际线【近战皮肤3】近战武器-处刑者"
+        "【挂饰34】挂饰-无人机【载具3】轮式突击炮-荣耀【货币】26三角币，0曼德尔币，169三角券，"
+        "流动资产35.9M，不动资产21.4M【QQ登录】【可二次实名】【找回包赔】</h1></div></body></html>")
+    status, ack = _post(state, "/ingest/detail",
+                        {"url": f"https://www.pxb7.com/product/{listing_id}/1",
+                         "html": detail_html})
+    assert status == 200 and ack["ok"] and ack["snapshot_rows_updated"] == 1
+
+    view = G.handle_listings(state, {"game_id": ["10371"]})
+    labels = [c["label"] for c in view["columns"]]
+    assert "红皮/大红" in labels and "武器皮肤" in labels and "挂饰" in labels \
+        and "烽火等级" in labels and "三角券" in labels and "实名受限（不可二次）" in labels
+    assert "原石" not in labels and "共鸣链（N命）" not in labels, "三角洲视图不得出现别家术语"
+    assert {c["source"] for c in view["columns"] if c["label"] in ("红皮/大红", "三角币")} == {"feat"}
+    assert view["total"] == 1
+    cells = view["rows"][0]["cells"]
+    assert cells["delta_operator_skin_cnt"] == 5 and cells["delta_melee_skin_cnt"] == 3
+    assert cells["delta_charm_cnt"] == 34 and cells["delta_vehicle_cnt"] == 3
+    assert cells["delta_legendary_weapon_cnt"] == 30 and cells["delta_epic_weapon_cnt"] == 47
+    assert cells["delta_fenghuo_level_cnt"] == 60
+    assert cells["delta_triangle_coin_cnt"] == 26 and cells["delta_mandela_coin_cnt"] == 0, \
+        "0曼德尔币是有效值（0 与缺失分开）"
+    assert cells["delta_service_recall_flag"] is True and cells["delta_second_realname_flag"] is True
+
+
+def test_listings_invalid_params_fall_back(state: G.GatewayState) -> None:
+    _post(state, "/ingest/cards", CARDS_PAYLOAD)
+    res = G.handle_listings(state, {"limit": ["9999"], "offset": ["-5"], "game_id": ["abc"]})
+    assert res["ok"] and res["limit"] == G.LISTINGS_PAGE_DEFAULT
+    assert res["offset"] == 0 and res["game_id"] is None
+    assert [g["game_id"] for g in res["games"]] == [10026], "games 列表用于看板筛选"
+
+
+def test_stats_keywords_grouped_by_game(state: G.GatewayState) -> None:
+    """词表命中按游戏分组（各游戏词表不混算），看板据此切换。"""
+    _post(state, "/ingest/cards", CARDS_PAYLOAD)
+    payload = G.build_stats_payload(state)
+    by_game = payload["db"]["top_keywords_by_game"]
+    assert "10026" in by_game and by_game["10026"]["game_name"] == "原神"
+    assert by_game["10026"]["top"], "原神应有词表命中"
+    assert all(h["keyword"] for h in by_game["10026"]["top"])
+    assert payload["db"]["top_keywords"], "全局 Top 列表保留（全部游戏视图用）"
 
 
 def test_invalid_body_rejected(state: G.GatewayState) -> None:
@@ -317,10 +423,22 @@ def test_plugin_config_defaults_and_roundtrip(settings: cfg.Settings) -> None:
     with pytest.raises(G.GatewayError):
         G.save_plugin_config(settings, {"reingest_interval_min": 0})       # 范围外
     with pytest.raises(G.GatewayError):
-        G.save_plugin_config(settings, {"cards_target": 8})                # 低于一页
+        G.save_plugin_config(settings, {"cards_target": 0})                # 低于一张
     with pytest.raises(G.GatewayError):
         G.save_plugin_config(settings, {"cards_target": 500})              # 超上限
     assert G.save_plugin_config(settings, {"cards_target": 48})["cards_target"] == 48
+    for count in (1, 8, 17, 31, 200):
+        assert G.save_plugin_config(settings, {"cards_target": count})["cards_target"] == count
+    for mode in ("list", "detail"):
+        assert G.save_plugin_config(settings, {"collection_mode": mode})["collection_mode"] == mode
+    for invalid in ("fast", None, 1, True):
+        with pytest.raises(G.GatewayError):
+            G.save_plugin_config(settings, {"collection_mode": invalid})
+    assert saved["title_interval_ms"] == 3000
+    assert G.save_plugin_config(settings, {"title_interval_ms":6000})["title_interval_ms"] == 6000
+    for invalid in (0, 1000, 16000):
+        with pytest.raises(G.GatewayError):
+            G.save_plugin_config(settings, {"title_interval_ms":invalid})
     with pytest.raises(G.GatewayError):
         G.save_plugin_config(settings, {"unknown": 1})                     # 未知键
     with pytest.raises(G.GatewayError):

@@ -284,7 +284,7 @@ def test_cli_extract_writes_keywords(settings, tmp_path, capsys) -> None:
     assert cli.main(["extract", "--settings", str(settings_file), "--db", str(settings.paths.db)]) \
         == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert "写入 43 条" in out, "原神 18 + 鸣潮 25（docs/02 §4.A1/§4.A4）"
+    assert "写入 75 条" in out, "原神 18 + 鸣潮 25 + 三角洲 32（docs/02 §4.A1/§4.A4/§4.B）"
     conn = db.connect(settings.paths.db, read_only=True)
     try:
         total, enabled = conn.execute(
@@ -292,7 +292,8 @@ def test_cli_extract_writes_keywords(settings, tmp_path, capsys) -> None:
         ).fetchone()
     finally:
         conn.close()
-    assert total == 43 and enabled == 42, "43 条种子（原神 18 + 鸣潮 25）中 1 条为 disabled 占位"
+    assert total == 75 and enabled == 74, \
+        "75 条种子（原神 18 + 鸣潮 25 + 三角洲 32）中 1 条为 disabled 占位"
 
 
 def test_cli_load_is_parse_raw_alias(settings, tmp_path, capsys) -> None:

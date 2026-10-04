@@ -23,7 +23,7 @@ def _manifest() -> dict:
 def test_manifest_v3_contract() -> None:
     m = _manifest()
     assert m["manifest_version"] == 3, "必须是 MV3 独立扩展"
-    assert m["name"] and m["version"] == "0.4.0"
+    assert m["name"] and m["version"] == "0.5.0"
     assert m["background"]["service_worker"] == "background.js"
     assert m["action"]["default_popup"] == "popup.html"
     assert set(m["permissions"]) <= {"storage", "tabs", "clipboardWrite", "alarms"}, "权限最小化"
@@ -33,11 +33,14 @@ def test_manifest_v3_contract() -> None:
     assert "<all_urls>" not in json.dumps(m)
     matches = m["content_scripts"][0]["matches"]
     assert matches == ["https://www.pxb7.com/buy/*", "https://www.pxb7.com/product/*"]
-    assert m["content_scripts"][0]["js"] == ["sweep.js", "content.js"]
+    assert m["content_scripts"][0]["js"] == ["sweep.js", "titles.js", "content.js"]
+    assert m["content_scripts"][1]["js"] == ["title-source.js"]
+    assert m["content_scripts"][1]["world"] == "MAIN"
+    assert m["content_scripts"][1]["run_at"] == "document_start"
 
 
 def test_extension_assets_exist() -> None:
-    for name in ("background.js", "content.js", "sweep.js", "popup.html", "popup.js", "popup.css"):
+    for name in ("background.js", "collection.js", "content.js", "sweep.js", "titles.js", "title-source.js", "popup.html", "popup.js", "popup.css"):
         assert (EXT / name).is_file(), f"缺资产：{name}"
 
 

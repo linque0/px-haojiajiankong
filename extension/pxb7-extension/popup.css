@@ -5,7 +5,7 @@
 }
 * { box-sizing: border-box; }
 body {
-  width: 380px; margin: 0; padding: 10px 12px 8px; background: var(--bg);
+  width: 420px; max-height: 590px; overflow-y:auto; margin: 0; padding: 10px 12px 8px; background: var(--bg);
   color: var(--text); font: 12px/1.55 system-ui, "Microsoft YaHei", sans-serif;
 }
 header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
@@ -30,6 +30,16 @@ header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
   width: 70px; background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: 6px; padding: 2px 6px;
 }
+.settings select { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+.setting-help {color:var(--muted); border-top:1px solid var(--line); margin-top:8px; padding-top:8px;}
+.setting-help b {color:var(--text); font-weight:500;}
+.collection-progress {position:sticky; top:0; z-index:2; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px;}
+.progress-head {display:flex; justify-content:space-between; align-items:center; gap:8px;}
+progress {width:100%; height:10px; border:0; border-radius:8px; margin:6px 0; accent-color:var(--green);}
+progress::-webkit-progress-bar {background:var(--bg); border-radius:8px;}
+progress::-webkit-progress-value {background:var(--green); border-radius:8px; transition:width .2s;}
+button:disabled {opacity:.45; cursor:default;}
+.actions {flex-wrap:wrap;}
 .muted { color: var(--muted); }
 .targets { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
 .targets label.tg { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }

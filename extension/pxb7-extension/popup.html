@@ -12,6 +12,32 @@
   <span id="state" class="state">连接中…</span>
   <span id="ver" class="ver"></span>
 </header>
+<section class="collection-progress" aria-live="polite">
+  <div class="progress-head"><b id="progress-mode">采集进度</b><span id="progress-count">尚未开始</span></div>
+  <progress id="collect-progress" max="100" value="0" aria-label="采集进度"></progress>
+  <div id="progress-phase" class="muted">选择方式、填写张数，然后采集本页。</div>
+  <div class="progress-head"><span id="progress-detail" class="muted"></span><button id="grab" class="mini accent">采集本页</button><button id="cancel-collect" class="mini ghost" disabled>取消采集</button></div>
+</section>
+
+<div class="cap">采集设置（保存后生效）</div>
+<section class="settings">
+  <label>采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+  <div id="mode-help" class="muted"></div>
+  <label><input type="checkbox" id="c-auto"> 自动采集</label>
+  <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
+  <label>每次采集张数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>
+  <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
+  <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="2" max="15" step="1" value="3"></label>
+  <div class="muted">全文请求间隔仅用于列表模式；详情模式内容就绪即采集，不加固定间隔。</div>
+  <label><input type="checkbox" id="c-debug"> 调试日志</label>
+  <div class="muted">默认 16 张；支持 1～200 任意整数，仅采前 N 个唯一商品；不足时尝试滚动加载更多，无法继续加载会提示实际数量。直接在详情页采集时仅采当前商品。</div>
+  <div class="setting-help"><b>去重间隔：</b>同一标签页会话内，同一网址成功自动采集后，多久才能再次自动采集。手动「采集本页」不受此限制；它不是商品间的等待时间。<br><b>SPA 等待：</b>站内切换路由后，给页面渲染预留的等待时间。详情队列直接观察标题就绪，不逐张应用此等待。</div>
+  <div class="row">
+    <button id="save">保存设置</button>
+    <span id="note" class="note"></span>
+  </div>
+</section>
+
 
 <section id="tiles" class="tiles"></section>
 
@@ -24,30 +50,16 @@
 <div class="cap">采集目标（勾选要采集的游戏）</div>
 <section id="targets" class="targets"></section>
 
-<div class="cap">设置（脚本自动应用）</div>
-<section class="settings">
-  <label><input type="checkbox" id="c-auto"> 自动采集</label>
-  <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
-  <label>每次采集张数 <input type="number" id="c-cards" min="16" max="200" step="16" value="16"></label>
-  <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
-  <label><input type="checkbox" id="c-debug"> 调试日志</label>
-  <div class="muted" style="margin:-2px 0 4px">站点一页渲染 16 张；调大后脚本会在页内滚动加载更多卡片（每 2 秒一轮，连续两轮无新增即停），再一次性入库。</div>
-  <div class="row">
-    <button id="save">保存设置</button>
-    <span id="note" class="note"></span>
-  </div>
-</section>
-
 <div class="cap">数据存放位置（本机）</div>
 <section id="paths" class="paths"></section>
 
 <section class="actions">
-  <button id="grab" class="accent">采集本页</button>
   <button id="upd-ext" class="ghost" style="display:none" title="按磁盘最新代码重载扩展（Chrome/Edge/夸克通用）">应用扩展更新</button>
   <button id="full" class="ghost">完整看板</button>
   <button id="stop" class="ghost">停止服务</button>
 </section>
-<footer>只读取你正在浏览的 pxb7 页面 · 数据仅存本机 · 不请求站外接口<br>
+<footer>数据仅存本机 · 两种方式均无需悬浮<br>
+  详情队列复用一个后台标签页，关闭弹窗仍可继续<br>
   扩展 v0.3.0+ 支持自更新：代码更新后自动重载，无需再手动「重新加载」<br>
   路径自定义请点「完整看板 → 数据存放位置」</footer>
 <script src="popup.js"></script>

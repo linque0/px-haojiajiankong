@@ -95,6 +95,8 @@ def _browser_checks(before: dict) -> dict:
         "batches": before["stats"]["batches"],
         "risk_pages_rejected": before["stats"]["risk_pages_rejected"],
         "snapshot_rows": before["db"]["snapshot_rows"]}}
+    # 弹窗「每次采集张数」应显示网关当前配置（用户可能自己调过，不假设默认 16）
+    expected_cards = str((before.get("config") or {}).get("cards_target", 16))
 
     with sync_playwright() as p:
         profile = tempfile.mkdtemp(prefix="pxb7-e2e-profile-")
@@ -215,8 +217,8 @@ def _browser_checks(before: dict) -> dict:
             assert popup_state["hasButtons"], "弹窗按钮缺失"
             assert popup_state["targets"] >= 4, "弹窗采集目标多选未渲染"
             assert popup_state["paths_rows"] >= 9, "弹窗数据路径区未渲染"
-            assert popup_state["cards_target"] == "16", \
-                f"「每次采集张数」默认应为 16，实际 {popup_state['cards_target']}"
+            assert popup_state["cards_target"] == expected_cards, \
+                f"「每次采集张数」应显示网关当前配置 {expected_cards}，实际 {popup_state['cards_target']}"
 
             # 3b) 扩展自更新通道（v0.3.0+）：check-update 消息 → 同版本不误报更新
             self_update = popup.evaluate(
@@ -243,13 +245,61 @@ def _browser_checks(before: dict) -> dict:
                     .map((tr) => tr.cells[1].textContent.trim()),
                 has_form: ['p-db', 'p-raw_root', 'p-runs', 'p-log_dir']
                     .every((id) => !!document.getElementById(id)),
+                game_options: document.querySelectorAll('#l-game option').length,
+                list_headers: Array.from(document.querySelectorAll('#listings thead th'))
+                    .map((th) => th.textContent.trim()),
+                list_rows: document.querySelectorAll('#listings tbody tr').length,
+                page_text: (document.getElementById('l-page') || {}).textContent || '',
+                total_text: (document.getElementById('l-total') || {}).textContent || '',
+                kw_title: (document.getElementById('kw-title') || {}).textContent || '',
             })""")
             result["dashboard"] = dash_state
             print(f"[e2e] 看板：目标 {dash_state['targets']} 项、路径 {len(dash_state['paths'])} 条、"
-                  f"表单={'有' if dash_state['has_form'] else '缺'}")
+                  f"表单={'有' if dash_state['has_form'] else '缺'}、"
+                  f"游戏选项 {dash_state['game_options']}、表格列 {len(dash_state['list_headers'])}、"
+                  f"{dash_state['page_text']}（{dash_state['total_text']}）")
             assert dash_state["targets"] >= 4, "看板采集目标未渲染"
             assert len(dash_state["paths"]) >= 9, "看板数据路径未渲染"
             assert dash_state["has_form"], "看板路径自定义表单缺失"
+            assert dash_state["game_options"] >= 2, "数据浏览缺少游戏筛选（全部 + 至少一个有数据的游戏）"
+            assert len(dash_state["list_headers"]) >= 5, "数据浏览表头未渲染"
+            assert "/" in dash_state["page_text"], f"页码未渲染：{dash_state['page_text']}"
+            # 切到某个游戏：列名应换成该游戏的词表说法（原神=原石/黄数；鸣潮=共鸣链/精N）
+            dash.select_option("#l-game", value="10302")
+            time.sleep(1.5)
+            wuwa_view = dash.evaluate("""() => ({
+                headers: Array.from(document.querySelectorAll('#listings thead th'))
+                    .map((th) => th.textContent.trim()),
+                kw_title: document.getElementById('kw-title').textContent,
+                rows: document.querySelectorAll('#listings tbody tr').length,
+                kw_select: document.getElementById('k-game').value,
+                list_select: document.getElementById('l-game').value,
+            })""")
+            result["dashboard_wuwa"] = wuwa_view
+            print(f"[e2e] 切到鸣潮：列={wuwa_view['headers']}｜{wuwa_view['kw_title']}")
+            assert "黄数" in wuwa_view["headers"] and "区服" in wuwa_view["headers"], \
+                f"鸣潮列名不符：{wuwa_view['headers']}"
+            assert "原石" not in wuwa_view["headers"], "鸣潮视图不得出现原神术语（原石）"
+            assert "鸣潮" in wuwa_view["kw_title"], "词表面板未跟随游戏筛选"
+            assert wuwa_view["kw_select"] == wuwa_view["list_select"] == "10302", \
+                "两个游戏下拉必须互相同步（同一份筛选状态）"
+            # 翻页：下一页后 offset 变化（行内容随之变化）
+            first_before = dash.evaluate(
+                "() => (document.querySelector('#listings tbody tr td') || {}).textContent")
+            if not dash.evaluate("() => document.getElementById('l-next').disabled"):
+                dash.click("#l-next")
+                time.sleep(1.2)
+                first_after = dash.evaluate(
+                    "() => (document.querySelector('#listings tbody tr td') || {}).textContent")
+                page_after = dash.text_content("#l-page")
+                result["paging"] = {"before": first_before, "after": first_after,
+                                    "page": page_after}
+                print(f"[e2e] 翻页：{first_before} → {first_after}（{page_after}）")
+                assert first_after != first_before, "翻页后首行未变化"
+            else:
+                print("[e2e] 鸣潮数据只有一页，跳过翻页断言")
+            dash.select_option("#l-game", value="0")
+            time.sleep(1.0)
 
             # 勾选鸣潮 → 网关 targets 立即生效
             dash.locator('#targets input[data-task="wuwa_official"]').check()
