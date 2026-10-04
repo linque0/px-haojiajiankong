@@ -68,6 +68,36 @@ def test_roster_keeps_names_duplicates_and_excludes_four_stars():
     assert result.features['five_star_weapon_refined'] == 3
 
 
+def test_roster_unannotated_characters_are_zero_chain():
+    # 2026-10-04 用户规则：段内未标注 N命 的角色视为 0命，同样进共鸣链列表并保持原文顺序
+    result = X.extract_listing(X.seed_keywords(game_id=10302), listing_id='123456',
+                               title='80级，20黄，19个五星角色：3命弗洛洛，2命安可，鉴心；15个五星武器：精1千古洑流')
+    chains = result.features['five_star_character_chains']
+    assert [r['name'] for r in chains] == ['弗洛洛', '安可', '鉴心']
+    assert [r['value'] for r in chains] == [3, 2, 0]
+    assert result.features['constellation_cnt'] == 3
+    assert result.features['five_star_weapon_refined'] == 1
+    # 武器段不猜精0：无精炼标注的武器不进列表
+    assert [r['name'] for r in result.features['five_star_weapon_refinements']] == ['千古洑流']
+
+
+def test_roster_all_unannotated_characters_are_zero_chain():
+    result = X.extract_listing(X.seed_keywords(game_id=10302), listing_id='123456',
+                               title='80级，20黄，2个五星角色：鉴心，维里奈')
+    chains = result.features['five_star_character_chains']
+    assert [r['value'] for r in chains] == [0, 0]
+    assert result.features['constellation_cnt'] == 0
+
+
+def test_roster_zero_chain_rejects_noise_and_truncated_chain():
+    # 孤立「3命」（被截断的具名条目）不冒充 0命；【官方截图】等尾随杂质从名字剔除
+    result = X.extract_listing(X.seed_keywords(game_id=10302), listing_id='123456',
+                               title='80级，2个五星角色：3命，鉴心【官方截图】，15个五星武器：精1千古洑流')
+    chains = result.features['five_star_character_chains']
+    assert [r['name'] for r in chains] == ['鉴心']
+    assert [r['value'] for r in chains] == [0]
+
+
 def test_card_title_without_attribute_keeps_weapon_section():
     title = '80级，25个五星角色：' + '满命维里奈，' * 30 + '17个五星武器：精1千古洑流'
     html = f'<a href="/product/123456/1"><div class="smallCardTitle">{title}</div></a>'

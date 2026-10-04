@@ -304,8 +304,59 @@ def listing_text(title: str | None, card_fields: Mapping[str, Any] | None) -> st
     return " ".join(parts)
 
 
+WUWA_PAID_ITEMS = (
+    ("vehicle_frame_modules", "车架模组"),
+    ("motorcycle_ornaments", "摩托饰品"),
+    ("character_skins", "人物皮肤"),
+)
+
+
+def wuwa_paid_item_features(text: str) -> dict[str, Any]:
+    """仅从明确的具名段提取商品；服饰是站点的人物皮肤段名。"""
+    aliases = {"车架模组": "vehicle_frame_modules", "摩托饰品": "motorcycle_ornaments",
+               "人物皮肤": "character_skins", "角色皮肤": "character_skins", "服饰": "character_skins"}
+    headings = list(re.finditer(r"(车架模组|摩托饰品|人物皮肤|角色皮肤|服饰|涂装)\s*[:：]", text))
+    features: dict[str, Any] = {}
+    for i, heading in enumerate(headings):
+        key = aliases.get(heading.group(1))
+        if key is None:
+            continue
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
+        section = re.split(r"[;；\n]|详情看图|官方截图|点击查看更多|【|\[", text[heading.end():end])[0]
+        names = [name.strip() for name in re.split(r"[,，、]", section) if name.strip()]
+        if names:
+            features[key] = list(dict.fromkeys([*features.get(key, []), *names]))
+    return features
+
+
+_ROSTER_TAIL_NOISE = re.compile(
+    r"[【\[（(].*$|官方截图.*|详情看图.*|点击查看更多.*|[。．.,，、;；\s]+$")
+_ROSTER_NAME = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9·‧・]{1,24}$")
+_ROSTER_NON_NAME = re.compile(
+    r"[五四]星|武器|角色|车架|摩托|涂装|服饰|皮肤|音擎|光锥|等|共|售|价|浏览")
+
+
+def _zero_chain_name(item: str) -> str | None:
+    """五星角色段内未标注升格的名字清洗（2026-10-04 用户规则：未标注即 0命）。
+
+    像角色名才收；纯数字、杂词、被截断的具名升格条目（如孤立的「3命」）不冒充 0命。
+    """
+    name = _ROSTER_TAIL_NOISE.sub("", item).strip()
+    if not name or name.isdigit():
+        return None
+    if re.match(r"^(?:满命|满链|(?:[0-6零一二三四五六])\s*(?:命|链)|共鸣链\s*[0-6])", name):
+        return None
+    if not _ROSTER_NAME.match(name) or _ROSTER_NON_NAME.search(name):
+        return None
+    return name
+
+
 def roster_features(text: str) -> dict[str, Any]:
-    """按五星/四星段解析具名升格；不把四星满命写成五星链数。重复武器保留。"""
+    """按五星/四星段解析具名升格；不把四星满命写成五星链数。重复武器保留。
+
+    五星角色段内未标注 N命/满命 的角色按 0命 记入链数列表（值 0，保持原文顺序）；
+    五星武器段不猜精0，仍只收具名精炼。
+    """
     headings = list(re.finditer(r"\d+\s*个?\s*([五四]星(?:角色|武器))\s*[:：]", text))
     features: dict[str, Any] = {}
     for i, heading in enumerate(headings):
@@ -313,7 +364,7 @@ def roster_features(text: str) -> dict[str, Any]:
         if kind not in ("五星角色", "五星武器"):
             continue
         end = headings[i + 1].start() if i + 1 < len(headings) else len(text)
-        section = re.split(r"[;；]|车架模组|摩托饰品|详情看图|服饰[:：]", text[heading.end():end])[0]
+        section = re.split(r"[;；]|车架模组|摩托饰品|详情看图|(?:服饰|人物皮肤|角色皮肤|涂装)\s*[:：]", text[heading.end():end])[0]
         entries = []
         pattern = (r"^(满命|满链|(?:[0-6零一二三四五六])\s*(?:命|链)|共鸣链\s*[0-6])\s*(.+)$"
                    if kind == "五星角色" else
@@ -325,6 +376,10 @@ def roster_features(text: str) -> dict[str, Any]:
                 value = _convert_value(feature, match.group(1))
                 if value is not None:
                     entries.append({"name": match.group(2).strip(), "value": value})
+            elif kind == "五星角色":
+                name = _zero_chain_name(item)
+                if name:
+                    entries.append({"name": name, "value": 0})
         if entries:
             key = "five_star_character_chains" if kind == "五星角色" else "five_star_weapon_refinements"
             features[key] = entries
@@ -382,6 +437,8 @@ def extract_listing(keywords: Sequence[Keyword], *, listing_id: str,
         if re.search(r"\d+\s*个?\s*[五四]星角色\s*[:：]", title or ""):
             out.features.pop("constellation_cnt", None)
         out.features.update(roster_features(title or ""))
+    if any(kw.profile_id == "wuwa_10302" for kw, _ in compiled):
+        out.features.update(wuwa_paid_item_features(title or ""))
     return out
 
 
