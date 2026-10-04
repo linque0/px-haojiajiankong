@@ -23,10 +23,11 @@ def _manifest() -> dict:
 def test_manifest_v3_contract() -> None:
     m = _manifest()
     assert m["manifest_version"] == 3, "必须是 MV3 独立扩展"
-    assert m["name"] and m["version"] == "0.5.0"
+    assert m["name"] and m["version"] == "0.5.2"
     assert m["background"]["service_worker"] == "background.js"
     assert m["action"]["default_popup"] == "popup.html"
-    assert set(m["permissions"]) <= {"storage", "tabs", "clipboardWrite", "alarms"}, "权限最小化"
+    assert set(m["permissions"]) <= {"storage", "tabs", "clipboardWrite", "alarms",
+                                     "nativeMessaging"}, "权限最小化（nativeMessaging 仅用于弹窗一键启停本机网关）"
     assert "alarms" in m["permissions"], "自更新周期检查需要 alarms"
     for entry in m["host_permissions"]:
         assert entry in LOOPBACK_HOSTS, f"host_permissions 只允许本机回环网关：{entry}"

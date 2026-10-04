@@ -110,6 +110,16 @@
   <div class="cols">
     <section>
       <h2>最近批次（实时）</h2>
+      <div class="toolbar" aria-label="最近批次分页">
+        <span class="muted">每页 10 条</span>
+        <span id="b-total" class="muted">共 0 条</span>
+        <span style="flex:1"></span>
+        <button class="ghost mini" id="b-first" disabled>首页</button>
+        <button class="ghost mini" id="b-prev" disabled>上一页</button>
+        <span id="b-page" class="muted" aria-live="polite">第 1 / 1 页</span>
+        <button class="ghost mini" id="b-next" disabled>下一页</button>
+        <button class="ghost mini" id="b-last" disabled>末页</button>
+      </div>
       <table id="batches"><thead><tr>
         <th>时间</th><th>类型</th><th>明细</th><th>结果</th>
       </tr></thead><tbody></tbody></table>
@@ -213,7 +223,7 @@
       <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
       <label>每次采集张数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
-      <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="2" max="15" step="1"></label>
+      <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="0" max="10" step="0.1"></label>
       <label><input type="checkbox" id="c-debug"> 调试日志（控制台）</label>
       <p class="muted" style="margin:2px 0 0">
         扩展支持 1～200 任意整数，只采前 N 个唯一商品；不足时滚动加载更多，连续两轮无新增即停。详情模式复用一个后台标签页逐个采集，标题就绪即读取，无逐商品固定等待。<br>
@@ -276,6 +286,38 @@ function bars(rows, labelFn, valueFn, max) {
   }).join("") || '<div class="muted">暂无数据——去 pxb7 逛一圈就会有了</div>';
 }
 
+const batchState = {page: 0, pageSize: 10, rows: []};
+function renderBatches(rows) {
+  if (rows) batchState.rows = rows.slice().reverse();
+  const total = batchState.rows.length;
+  const pages = Math.max(1, Math.ceil(total / batchState.pageSize));
+  batchState.page = Math.max(0, Math.min(batchState.page, pages - 1));
+  const start = batchState.page * batchState.pageSize;
+  $("batches").querySelector("tbody").innerHTML = batchState.rows.slice(start, start + batchState.pageSize)
+    .map(b => {
+      const detail = b.kind === "cards"
+        ? `卡片 ${b.cards_seen} 张`
+        : `详情 ${b.listing_id}`;
+      const res = b.kind === "cards"
+        ? `入库 ${b.snapshots}（新 ${b.new_listings}，解析率 ${(b.parse_success_rate * 100).toFixed(0)}%）`
+        : `回填 ${b.rows_updated} 行（浏览 ${b.viewers_masked ?? "—"}，收藏 ${b.favorites_cnt ?? "—"}）`;
+      return `<tr><td class="num">${esc(b.at)}</td><td>${b.kind === "cards" ? "列表" : "详情"}` +
+             `</td><td>${esc(detail)}</td><td class="num">${esc(res)}</td></tr>`;
+    }).join("") || '<tr><td colspan="4" class="muted">暂无批次——安装用户脚本后浏览 pxb7 即产生</td></tr>';
+  $("b-total").textContent = `共 ${fmt(total)} 条`;
+  $("b-page").textContent = `第 ${batchState.page + 1} / ${pages} 页`;
+  $("b-first").disabled = $("b-prev").disabled = batchState.page === 0;
+  $("b-next").disabled = $("b-last").disabled = batchState.page === pages - 1;
+}
+["first", "prev", "next", "last"].forEach(action => {
+  $("b-" + action).addEventListener("click", () => {
+    const last = Math.max(0, Math.ceil(batchState.rows.length / batchState.pageSize) - 1);
+    batchState.page = action === "first" ? 0 : action === "last" ? last
+      : batchState.page + (action === "prev" ? -1 : 1);
+    renderBatches();
+  });
+});
+
 function render(s) {
   $("task-pill").textContent = `任务 ${s.task.task_id}（${s.task.name}）`;
   $("script-pill").textContent = `插件批次 ${s.stats.batches} · 最近 ${s.stats.last_batch_at ?? "—"}`;
@@ -328,17 +370,7 @@ function render(s) {
     tile("拦截页拒收", fmt(st.risk_pages_rejected), "不入库（防线）"),
   ].join("");
 
-  $("batches").querySelector("tbody").innerHTML = (s.recent_batches || []).slice().reverse()
-    .map(b => {
-      const detail = b.kind === "cards"
-        ? `卡片 ${b.cards_seen} 张`
-        : `详情 ${b.listing_id}`;
-      const res = b.kind === "cards"
-        ? `入库 ${b.snapshots}（新 ${b.new_listings}，解析率 ${(b.parse_success_rate * 100).toFixed(0)}%）`
-        : `回填 ${b.rows_updated} 行（浏览 ${b.viewers_masked ?? "—"}，收藏 ${b.favorites_cnt ?? "—"}）`;
-      return `<tr><td class="num">${esc(b.at)}</td><td>${b.kind === "cards" ? "列表" : "详情"}` +
-             `</td><td>${esc(detail)}</td><td class="num">${esc(res)}</td></tr>`;
-    }).join("") || '<tr><td colspan="4" class="muted">暂无批次——安装用户脚本后浏览 pxb7 即产生</td></tr>';
+  renderBatches(s.recent_batches || []);
 
   $("rounds").innerHTML = bars((s.db.rounds || []).slice().reverse(),
     r => r.round, r => r.rows);

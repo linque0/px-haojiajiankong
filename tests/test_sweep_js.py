@@ -26,7 +26,7 @@ SWEEP_JS = EXT / "sweep.js"
 def test_sweep_js_exists_and_is_wired_into_manifest() -> None:
     assert SWEEP_JS.is_file(), "缺少 sweep.js"
     manifest = json.loads((EXT / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.5.2"
     js = manifest["content_scripts"][0]["js"]
     assert js == ["sweep.js", "titles.js", "content.js"], "辅助脚本必须先于 content.js 注入"
     text = SWEEP_JS.read_text(encoding="utf-8")

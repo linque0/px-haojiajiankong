@@ -8,6 +8,8 @@
 "use strict";
 
 const GATEWAY = "http://127.0.0.1:8765";
+// Native Messaging 宿主：一键启停本机网关（安装：双击 安装网关启停.bat，登记 HKCU 注册表）
+const NATIVE_HOST = "com.pxb7.gateway";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s === null || s === undefined ? "—" : s)
   .replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -21,7 +23,7 @@ async function gfetch(path, options) {
     try { data = JSON.parse(text); } catch (e) { /* 非 JSON 响应 */ }
     return { ok: true, status: response.status, data };
   } catch (e) {
-    return { ok: false, err: "网关不可达（双击桌面「pxb7采集看板」可启动服务）" };
+    return { ok: false, err: "网关未运行；点上方「启动网关」或双击桌面「pxb7采集看板」" };
   }
 }
 
@@ -73,10 +75,31 @@ function renderBatches(batches) {
 function renderError(text) {
   $("state").textContent = "网关未连接";
   $("state").className = "state bad";
+  $("gw-start").style.display = "inline-block";
   $("tiles").innerHTML = "";
   $("rounds").innerHTML = "";
   $("batches").innerHTML = `<div class="note bad">${esc(text)}</div>`;
 }
+
+// ---------- 一键启停网关（Native Messaging 宿主：安装网关启停.bat 登记） ----------
+$("gw-start").addEventListener("click", () => {
+  $("gw-start").disabled = true;
+  note("正在启动网关…");
+  chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: "start" }, (reply) => {
+    $("gw-start").disabled = false;
+    if (chrome.runtime.lastError) {
+      note("启动失败：" + chrome.runtime.lastError.message
+        + "（请先双击 安装网关启停.bat 登记本扩展）", true);
+      return;
+    }
+    if (reply && reply.ok && reply.running) {
+      note(reply.started ? "网关已启动 ✓" : (reply.note || "网关已在运行"));
+      refresh();
+    } else {
+      note("启动失败：" + (reply && reply.error || "未知错误"), true);
+    }
+  });
+});
 
 // ---------- 采集目标（多选：只采集勾选的游戏） ----------
 let targetsSig = "";
@@ -197,6 +220,7 @@ async function refresh() {
   state.textContent = s.stats.last_batch_at
     ? "已连接 · " + s.stats.last_batch_at.slice(11) : "已连接 · 暂无批次";
   state.className = "state";
+  $("gw-start").style.display = "none";   // 已连接即收起启动按钮（断开时由 renderError 显示）
   renderTiles(s);
   renderBars((s.db.rounds || []).slice(-5));
   renderBatches(s.recent_batches || []);
@@ -272,7 +296,7 @@ $("stop").addEventListener("click", async () => {
   if (!window.confirm("停止本机采集服务？浏览页面的自动采集将暂停，直到再次打开看板/服务。")) return;
   const res = await gfetch("/shutdown", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-  if (res.ok) note("服务已停止；再次使用：双击桌面「pxb7采集看板」");
+  if (res.ok) note("服务已停止；再次使用：点「启动网关」按钮即可");
   else note("停止失败：" + errorText(res, "无响应"), true);
 });
 

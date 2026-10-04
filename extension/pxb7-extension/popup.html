@@ -10,6 +10,7 @@
   <span class="logo">🦀</span>
   <b>pxb7 采集看板</b>
   <span id="state" class="state">连接中…</span>
+  <button id="gw-start" class="mini accent" style="display:none" title="通过 Native Messaging 拉起本机网关（需先运行 安装网关启停.bat）">启动网关</button>
   <span id="ver" class="ver"></span>
 </header>
 <section class="collection-progress" aria-live="polite">
@@ -27,7 +28,7 @@
   <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
   <label>每次采集张数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>
   <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
-  <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="2" max="15" step="1" value="3"></label>
+  <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="0" max="10" step="0.1" value="3"></label>
   <div class="muted">全文请求间隔仅用于列表模式；详情模式内容就绪即采集，不加固定间隔。</div>
   <label><input type="checkbox" id="c-debug"> 调试日志</label>
   <div class="muted">默认 16 张；支持 1～200 任意整数，仅采前 N 个唯一商品；不足时尝试滚动加载更多，无法继续加载会提示实际数量。直接在详情页采集时仅采当前商品。</div>

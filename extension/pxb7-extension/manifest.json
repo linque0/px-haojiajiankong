@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "pxb7 采集助手（前端 B）",
-  "version": "0.5.0",
-  "description": "在你自己浏览的 pxb7 页面上就地采集已渲染的卡片/详情，发送到本机采集看板（127.0.0.1:8765）入库；可切换列表/详情采集、设置任意张数、查看进度和取消任务；按游戏勾选目标、查看数据存放路径；支持自更新。",
+  "version": "0.5.2",
+  "description": "在你自己浏览的 pxb7 页面上就地采集已渲染的卡片/详情，发送到本机采集看板（127.0.0.1:8765）入库；可切换列表/详情采集、设置任意张数、查看进度和取消任务；弹窗一键启停本机网关；按游戏勾选目标、查看数据存放路径；支持自更新。",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["storage", "tabs", "clipboardWrite", "alarms"],
+  "permissions": ["storage", "tabs", "clipboardWrite", "alarms", "nativeMessaging"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"

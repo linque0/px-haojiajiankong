@@ -632,6 +632,45 @@ def _cmd_browser_extension(args: argparse.Namespace) -> int:
     return EXIT_OK if found else EXIT_ERROR
 
 
+def _cmd_native_host(args: argparse.Namespace) -> int:
+    """注册/注销/检查「扩展弹窗一键启停网关」的 Native Messaging 宿主（HKCU，免管理员）。"""
+    from . import native_host as NH
+    from .config import load_settings
+
+    settings = load_settings(args.settings)
+    if args.action == "install":
+        result = NH.install(settings, ext_id=args.ext_id)
+    elif args.action == "uninstall":
+        result = NH.uninstall()
+    else:
+        result = NH.check(settings)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return EXIT_OK
+    if args.action == "install":
+        print(f"[native-host] 宿主清单：{result['manifest']}")
+        print(f"[native-host] 扩展 ID：{result['ext_id']}（{result['ext_id_source']}）")
+        print("[native-host] 启动器：" + result["launcher"])
+        print("[native-host] 注册表登记：")
+        for label, status in result["registry"]:
+            print(f"[native-host]   {label}: {'✓' if status is True else status}")
+        print(f"[native-host] {result['note']}")
+        print("[native-host] 若扩展页显示的 ID 与上面推导不一致，请用 "
+              "--ext-id <ID> 重新执行安装。")
+    elif args.action == "uninstall":
+        print("[native-host] 注册表注销：")
+        for label, status in result["registry"]:
+            print(f"[native-host]   {label}: {'✓ 已删除' if status is True else status}")
+        print(f"[native-host] 宿主清单删除：{'是' if result['manifest_removed'] else '本就不存在'}")
+    else:
+        print(f"[native-host] 宿主清单：{result['manifest_path']}"
+              f"（{'存在' if result['manifest_exists'] else '缺失，请先 install'}）")
+        for label, ok in result["registry"]:
+            print(f"[native-host]   {label}: {'已登记且指向本清单 ✓' if ok else '未登记/不一致'}")
+        print(f"[native-host] 网关：{'运行中' if result['gateway_running'] else '未运行'}")
+    return EXIT_OK
+
+
 def _cmd_prepare_analysis(args: argparse.Namespace) -> int:
     """分析就绪层：建/重建分析视图（docs/01 §4「分析层」），按需导出 CSV/Parquet + 数据字典。"""
     from . import analysis
@@ -659,13 +698,26 @@ def _cmd_prepare_analysis(args: argparse.Namespace) -> int:
 
 
 def _cmd_export_csv(args: argparse.Namespace) -> int:
-    """把采集数据导出成**一份 CSV**（一行一个 listing：最新价 + 结构化字段 + 词表命中 + 质量标记）。"""
+    """把采集数据导出成 CSV（一行一个 listing）：full=分析主表全列；game=该游戏「看板列」精选。"""
     from . import analysis
 
     settings = load_settings(args.settings)
     if args.db:
         settings = override_db_path(settings, args.db)
     analysis.prepare_analysis(settings)          # 先刷新分析视图/样本门槛，保证与库同口径
+    if args.layout == "game":
+        if not args.game:
+            print("[csv] 看板列版式（--layout game）需要同时给 --game <GAME_ID>；"
+                  f"已登记版式的游戏：{'、'.join(str(g) for g in sorted(analysis.CURATED_GAME_LAYOUTS))}",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        result = analysis.export_curated_csv(settings, args.out, game_id=args.game)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return EXIT_OK
+        for line in analysis.export_curated_csv_lines(result):
+            print(line)
+        return EXIT_OK
     result = analysis.export_main_csv(settings, args.out, game_id=args.game)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -830,6 +882,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_ext.add_argument("--json", action="store_true", help="以 JSON 输出")
     p_ext.set_defaults(func=_cmd_browser_extension)
 
+    p_nh = sub.add_parser(
+        "native-host",
+        help="注册/注销/检查「扩展弹窗一键启停网关」的 Native Messaging 宿主（HKCU，免管理员）")
+    add_common(p_nh)
+    p_nh.add_argument("--action", choices=("install", "uninstall", "check"), default="install",
+                      help="install=写清单并登记注册表（幂等）；uninstall=注销；check=只读检查")
+    p_nh.add_argument("--ext-id", dest="ext_id", metavar="EXT_ID",
+                      help="扩展 ID（32 位 a–p，扩展管理页可复制）；缺省按扩展目录路径自动推导")
+    p_nh.add_argument("--json", action="store_true", help="以 JSON 输出")
+    p_nh.set_defaults(func=_cmd_native_host)
+
     p_an = sub.add_parser(
         "prepare-analysis",
         help="分析就绪层：建/重建分析视图（每号最新态/词表命中/价格带/周聚合…），"
@@ -852,6 +915,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_csv.add_argument("--out", metavar="PATH",
                        help="输出路径（默认 data/analysis/pxb7-listings-<日期>.csv）")
     p_csv.add_argument("--game", type=int, metavar="GAME_ID", help="只导出该游戏")
+    p_csv.add_argument("--layout", choices=("full", "game"), default="full",
+                       help="full=分析主表全列（默认）；game=该游戏「看板列」精选版式"
+                            "（需 --game；列名用该游戏自己的词表说法，如鸣潮的"
+                            "共鸣链（N命）/武器精炼（精N）/资源/额外付费商品）")
     p_csv.add_argument("--json", action="store_true", help="以 JSON 输出摘要")
     p_csv.set_defaults(func=_cmd_export_csv)
 

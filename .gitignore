@@ -23,6 +23,10 @@ data/calibration-*.duckdb
 # 本机路径自定义（含本地绝对路径，按机器而异）
 config/paths_override.json
 
+# Native Messaging 宿主清单（安装器生成：本机绝对路径 + 扩展 ID，按机器而异；
+# 源文件 pxb7_gateway_host.py / run-host.bat 正常入库）
+extension/native-host/com.pxb7.gateway.json
+
 # 本地安全钩子状态与对话/工作流草稿
 .mimosa/
 .zcode/
