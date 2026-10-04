@@ -60,7 +60,7 @@ assert len(SNAPSHOT_COLUMNS) == 27, "fct_listing_snapshot 列数应为 27（与 
 TABLES: tuple[str, ...] = (
     "dim_game", "dim_task", "dim_listing", "dim_keyword",
     "fct_listing_snapshot", "fct_listing_keyword", "fct_price_change",
-    "fct_delist_event", "fct_event", "meta_column_comments",
+    "fct_delist_event", "fct_event", "meta_column_comments", "meta_params",
 )
 
 # collected_via 允许值（docs/01 §3.1：登录态优先，游客态仅降级通道，口径如实标注）
@@ -242,6 +242,9 @@ COLUMN_COMMENTS: dict[tuple[str, str], tuple[str, str]] = {
     ("meta_column_comments", "column_name"): ("被注释的列名（policy 行的 column_name 为口径名）", "docs/01 §4"),
     ("meta_column_comments", "comment"): ("该列/该口径的业务口径（看板/模型口径披露来源）", "docs/01 §4"),
     ("meta_column_comments", "source_doc"): ("口径出处（docs 章节）", "本项目约定"),
+    ("meta_params", "key"): ("运行期参数键（如 analysis_min_cell_sample=分析层样本门槛）", "docs/01 §5"),
+    ("meta_params", "value"): ("参数值（字符串存储；分析层视图以 CAST(...AS INTEGER) 子查询读取）", "本项目约定"),
+    ("meta_params", "updated_at"): ("参数最近更新时间（init-db / prepare-analysis 会刷新）", "本项目约定"),
     ("meta_column_comments", "updated_at"): ("注释写入时间", "本项目约定"),
     # policy 行：跨表口径（契约要求必覆盖的三项）
     ("policy", "min_cell_sample"): ("**样本门槛：子域样本 <30 不发布**——M1 挂牌价指数、M7 趋势阶段/关键词段指数、M8 价格带判定均适用（异环等新游提高到 50）；宁缺不编，不用小样本充数", "docs/01 §5 M1/M7；docs/02 §6/§5"),
@@ -410,6 +413,10 @@ def init_db(db_path: str | Path | None = None, *,
             "  source_doc VARCHAR,"
             "  updated_at TIMESTAMP,"
             "  PRIMARY KEY (table_name, column_name));"
+            "CREATE TABLE IF NOT EXISTS meta_params ("
+            "  key VARCHAR NOT NULL PRIMARY KEY,"
+            "  value VARCHAR,"
+            "  updated_at TIMESTAMP);"
             "CREATE INDEX IF NOT EXISTS idx_snapshot_listing ON fct_listing_snapshot (listing_id);"
             "CREATE INDEX IF NOT EXISTS idx_snapshot_round ON fct_listing_snapshot (snapshot_at);"
             "CREATE INDEX IF NOT EXISTS idx_keyword_hit_listing ON fct_listing_keyword (listing_id);"
@@ -475,7 +482,11 @@ def init_db(db_path: str | Path | None = None, *,
             " UNION ALL SELECT 'fct_delist_event', count(*) FROM fct_delist_event"
             " UNION ALL SELECT 'fct_event', count(*) FROM fct_event"
             " UNION ALL SELECT 'meta_column_comments', count(*) FROM meta_column_comments"
+            " UNION ALL SELECT 'meta_params', count(*) FROM meta_params"
         ).fetchall())
+
+        # 分析层（docs/01 §4「分析层」）：幂等 CREATE OR REPLACE，每次 init-db 重建
+        analysis_layer = ensure_analysis_views(conn)
     finally:
         if owns_conn:
             conn.close()
@@ -486,7 +497,288 @@ def init_db(db_path: str | Path | None = None, *,
         "created_tables": created,
         "table_count": len(TABLES),
         "row_counts": counts,
+        "analysis_layer": analysis_layer,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 分析层视图（docs/01 §4「分析层」）
+#   会话数据 → 分析就绪：每号最新态 / 分析主表（含词表命中与质量标记）/ 关键词长表与宽表
+#   （特征矩阵）/ 日粒度轨迹 / 周聚合（样本门槛）/ 价格带 v0（关键词锚点+域内分位）/
+#   捡漏候选 v0 / 下架速度。
+#   口径纪律（docs/02 §6「不伪造」）：样本不足一律不发布——低价带给 `unpublished`、
+#   周聚合给 `publishable=false`，绝不把不足样本的结论当结论。
+#   样本门槛不拼进 SQL：写入 meta_params（键 analysis_min_cell_sample），视图用子查询读取；
+#   改门槛只需重新执行本函数（更新参数行），视图无需重建。
+#   PIVOT 宽表的列集 = 当前 dim_keyword 里的 keyword_id → 词表更新后需重建视图
+#   （init-db / prepare-analysis 都会重建，幂等）。
+# --------------------------------------------------------------------------- #
+ANALYSIS_VIEWS: tuple[str, ...] = (
+    "v_listing_latest", "v_listing_analysis", "v_keyword_hits",
+    "v_listing_daily", "v_price_index_weekly", "v_price_band", "v_deals", "v_delist_speed",
+)
+
+# 物化表：DuckDB 不允许视图里用「按数据取值」的动态 PIVOT，故特征矩阵落成表，
+# 随 prepare-analysis / init-db 重建（词表或数据更新后重跑即可刷新）。
+ANALYSIS_TABLES: tuple[str, ...] = ("keyword_feature_matrix",)
+
+# 分析层全量清单（视图 + 物化表）：计数与导出都按这个来
+ANALYSIS_LAYER: tuple[str, ...] = ANALYSIS_VIEWS + ANALYSIS_TABLES
+
+MIN_CELL_SAMPLE_DEFAULT = 30          # 与 settings.quality.min_cell_sample 的默认值一致
+MIN_CELL_SAMPLE_PARAM = "analysis_min_cell_sample"
+
+
+def ensure_analysis_views(conn: duckdb.DuckDBPyConnection, *,
+                          min_cell_sample: int = MIN_CELL_SAMPLE_DEFAULT) -> list[str]:
+    """创建/重建分析层视图（幂等），并把样本门槛写入 meta_params。
+
+    门槛来源：settings.quality.min_cell_sample（默认 30，docs/01 §5）。门槛以参数行存储、
+    视图用子查询读取，所以这里没有拼接 SQL——只有内联字面量 DDL 与绑定参数。
+    """
+    size = max(1, int(min_cell_sample))
+    # 老库（本函数早于本表引入）可能还没有 meta_params：这里自足建表（幂等），
+    # 免得 prepare-analysis / export-csv 先要求跑一次 init-db。
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta_params ("
+        "  key VARCHAR NOT NULL PRIMARY KEY,"
+        "  value VARCHAR,"
+        "  updated_at TIMESTAMP)")
+    conn.execute(
+        "INSERT INTO meta_params (key, value, updated_at) VALUES (?, ?, now())"
+        " ON CONFLICT (key) DO UPDATE SET value = excluded.value,"
+        " updated_at = excluded.updated_at",
+        [MIN_CELL_SAMPLE_PARAM, str(size)])
+
+    # 1) 每号最新一轮快照（跨断面分析基座）+ 轨迹聚合
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_listing_latest AS
+        SELECT l.listing_id, l.game_id, g.game_name, g.genre, g.keyword_profile,
+               t.task_id, l.title, l.first_seen, l.last_seen, l.is_active,
+               s.snapshot_at, s.price_yuan, s.level, s.yellow_cnt, s.five_star_chars,
+               s.five_star_weapons, s.primogems, s.intertwined_fate, s.artifacts, s.skins,
+               s.server, s.mail_status, s.tap_status, s.psn_status, s.trade_code_status,
+               s.has_compensation, s.official_verified, s.featured_chars,
+               TRY_CAST(json_array_length(TRY_CAST(s.featured_chars AS JSON)) AS INTEGER)
+                   AS featured_chars_cnt,
+               s.img_cnt, s.viewers_masked, s.publish_time_text,
+               TRY_CAST(s.publish_time_text AS TIMESTAMP) AS publish_time,
+               s.mc_gender, s.favorites_cnt, s.parser_version, s.collected_via,
+               s.extracted_features,
+               TRY_CAST(json_extract_string(s.extracted_features, '$.constellation_cnt') AS BIGINT)
+                   AS feat_constellation_cnt,
+               TRY_CAST(json_extract_string(s.extracted_features, '$.five_star_weapon_refined') AS BIGINT)
+                   AS feat_five_star_weapon_refined,
+               TRY_CAST(json_extract_string(s.extracted_features, '$.primogems_cnt') AS BIGINT)
+                   AS feat_primogems_cnt,
+               TRY_CAST(json_extract_string(s.extracted_features, '$.intertwined_fate_cnt') AS BIGINT)
+                   AS feat_intertwined_fate_cnt,
+               count(*) OVER (PARTITION BY s.listing_id) AS snapshot_rounds,
+               min(s.snapshot_at) OVER (PARTITION BY s.listing_id) AS first_snapshot_at,
+               max(s.snapshot_at) OVER (PARTITION BY s.listing_id) AS last_snapshot_at,
+               min(s.price_yuan) OVER (PARTITION BY s.listing_id) AS price_min,
+               max(s.price_yuan) OVER (PARTITION BY s.listing_id) AS price_max,
+               date_diff('day', l.first_seen, s.snapshot_at) AS days_on_market
+        FROM fct_listing_snapshot s
+        JOIN dim_listing l ON l.listing_id = s.listing_id
+        LEFT JOIN dim_game g ON g.game_id = l.game_id
+        LEFT JOIN (SELECT game_id, min(task_id) AS task_id FROM dim_task GROUP BY game_id) t
+               ON t.game_id = l.game_id
+        QUALIFY row_number() OVER (PARTITION BY s.listing_id ORDER BY s.snapshot_at DESC) = 1
+    """)
+
+    # 2) 分析主表：最新快照 + 该轮词表命中（按类型计数与命中词清单）+ 质量标记
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_listing_analysis AS
+        WITH latest AS (SELECT * FROM v_listing_latest),
+        kw AS (
+            SELECT f.listing_id, f.snapshot_at, count(*) AS kw_hits,
+                   sum(CASE WHEN k.keyword_type = 'ceiling' THEN 1 ELSE 0 END) AS kw_ceiling_hits,
+                   sum(CASE WHEN k.keyword_type = 'floor' THEN 1 ELSE 0 END) AS kw_floor_hits,
+                   sum(CASE WHEN k.keyword_type = 'resource' THEN 1 ELSE 0 END) AS kw_resource_hits,
+                   sum(CASE WHEN k.keyword_type = 'risk' THEN 1 ELSE 0 END) AS kw_risk_hits,
+                   sum(CASE WHEN k.keyword_type = 'segment' THEN 1 ELSE 0 END) AS kw_segment_hits,
+                   string_agg(CASE WHEN k.keyword_type = 'ceiling' THEN k.keyword END, '、')
+                       AS ceiling_keywords,
+                   string_agg(CASE WHEN k.keyword_type = 'floor' THEN k.keyword END, '、')
+                       AS floor_keywords,
+                   string_agg(k.keyword, '、') AS hit_keywords
+            FROM fct_listing_keyword f JOIN dim_keyword k ON k.keyword_id = f.keyword_id
+            GROUP BY 1, 2
+        )
+        SELECT lt.*,
+               coalesce(kw.kw_hits, 0) AS kw_hits,
+               coalesce(kw.kw_ceiling_hits, 0) AS kw_ceiling_hits,
+               coalesce(kw.kw_floor_hits, 0) AS kw_floor_hits,
+               coalesce(kw.kw_resource_hits, 0) AS kw_resource_hits,
+               coalesce(kw.kw_risk_hits, 0) AS kw_risk_hits,
+               coalesce(kw.kw_segment_hits, 0) AS kw_segment_hits,
+               kw.ceiling_keywords, kw.floor_keywords, kw.hit_keywords,
+               round(date_diff('hour', lt.snapshot_at, now()), 1) AS snapshot_age_h,
+               concat_ws(',',
+                   CASE WHEN lt.price_yuan IS NULL THEN 'price_missing' END,
+                   CASE WHEN lt.price_yuan IS NOT NULL AND lt.price_yuan <= 0
+                        THEN 'price_nonpositive' END,
+                   CASE WHEN lt.yellow_cnt IS NOT NULL AND lt.five_star_chars IS NOT NULL
+                             AND lt.five_star_weapons IS NOT NULL
+                             AND lt.yellow_cnt < lt.five_star_chars + lt.five_star_weapons
+                        THEN 'yellow_lt_5star_sum' END,
+                   CASE WHEN lt.is_active IS FALSE THEN 'inactive' END,
+                   CASE WHEN lt.snapshot_rounds = 1 THEN 'single_round' END
+               ) AS quality_flags
+        FROM latest lt
+        LEFT JOIN kw ON kw.listing_id = lt.listing_id AND kw.snapshot_at = lt.snapshot_at
+    """)
+
+    # 3) 关键词命中长表（可读版：游戏/画像/类型/锚点 + 是否最新一轮）
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_keyword_hits AS
+        SELECT f.listing_id, l.game_id, g.game_name, k.profile_id, k.keyword_id, k.keyword,
+               k.keyword_type, k.price_anchor, f.snapshot_at, f.hit_text,
+               (max(f.snapshot_at) OVER (PARTITION BY f.listing_id) = f.snapshot_at)
+                   AS is_latest_round
+        FROM fct_listing_keyword f
+        JOIN dim_keyword k ON k.keyword_id = f.keyword_id
+        JOIN dim_listing l ON l.listing_id = f.listing_id
+        LEFT JOIN dim_game g ON g.game_id = l.game_id
+    """)
+
+    # 4) 特征矩阵（物化表：行 = listing×轮次×游戏，列 = keyword_id，0/1）
+    #    DuckDB 视图不支持动态 PIVOT（列集来自数据），因此落成表并随本函数重建。
+    #    空库（还没有任何命中）时动态 PIVOT 无法推断列集 → 建一张只有键列的空矩阵。
+    has_hits = conn.execute(
+        "SELECT count(DISTINCT keyword_id) FROM fct_listing_keyword").fetchone()[0]
+    if has_hits:
+        try:
+            conn.execute("""
+                CREATE OR REPLACE TABLE keyword_feature_matrix AS
+                SELECT * FROM (
+                    PIVOT (SELECT f.listing_id, f.snapshot_at, l.game_id, f.keyword_id, 1 AS hit
+                           FROM fct_listing_keyword f
+                           JOIN dim_listing l ON l.listing_id = f.listing_id)
+                    ON keyword_id USING first(hit)
+                )
+            """)
+        except duckdb.Error:
+            conn.rollback()          # 失败后必须回滚，否则连接上的后续语句全部 TransactionContext Error
+            has_hits = 0
+    if not has_hits:
+        conn.execute("""
+            CREATE OR REPLACE TABLE keyword_feature_matrix AS
+            SELECT f.listing_id, f.snapshot_at, l.game_id
+            FROM fct_listing_keyword f
+            JOIN dim_listing l ON l.listing_id = f.listing_id
+            WHERE FALSE
+        """)
+
+    # 5) 日粒度轨迹：每天每号的价格首/末/最低/最高与最新需求侧字段
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_listing_daily AS
+        SELECT l.game_id, g.game_name, CAST(s.snapshot_at AS DATE) AS day, s.listing_id,
+               count(*) AS snapshots,
+               arg_min(s.price_yuan, s.snapshot_at) AS price_first,
+               arg_max(s.price_yuan, s.snapshot_at) AS price_last,
+               min(s.price_yuan) AS price_min, max(s.price_yuan) AS price_max,
+               arg_max(s.viewers_masked, s.snapshot_at) AS viewers_last,
+               arg_max(s.favorites_cnt, s.snapshot_at) AS favorites_last
+        FROM fct_listing_snapshot s
+        JOIN dim_listing l ON l.listing_id = s.listing_id
+        LEFT JOIN dim_game g ON g.game_id = l.game_id
+        GROUP BY 1, 2, 3, 4
+    """)
+
+    # 6) 周聚合（游戏×区服×价格段）：链式指数需 ≥4 周历史，故只发聚合量并标 publishable
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_price_index_weekly AS
+        WITH weekly AS (
+            SELECT date_trunc('week', s.snapshot_at) AS week_start,
+                   l.game_id, g.game_name, coalesce(s.server, '未标注') AS server,
+                   CASE WHEN s.price_yuan IS NULL THEN 'unknown'
+                        WHEN s.price_yuan < 500 THEN '0-500'
+                        WHEN s.price_yuan < 2000 THEN '500-2000'
+                        WHEN s.price_yuan < 10000 THEN '2000-10000'
+                        ELSE '10000+' END AS price_bucket,
+                   count(*) AS snapshots, count(DISTINCT s.listing_id) AS listings,
+                   round(median(s.price_yuan), 1) AS price_median,
+                   round(quantile_cont(s.price_yuan, 0.25), 1) AS price_p25,
+                   round(quantile_cont(s.price_yuan, 0.75), 1) AS price_p75
+            FROM fct_listing_snapshot s
+            JOIN dim_listing l ON l.listing_id = s.listing_id
+            LEFT JOIN dim_game g ON g.game_id = l.game_id
+            GROUP BY 1, 2, 3, 4, 5
+        )
+        SELECT *, (listings >= coalesce((SELECT CAST(value AS INTEGER) FROM meta_params
+                                         WHERE key = 'analysis_min_cell_sample'), 30))
+                   AS publishable,
+               'v0：周聚合口径（计数/中位数/四分位）；链式指数待 ≥4 周历史后再建（docs/01 §5）'
+                   AS method
+        FROM weekly
+    """)
+
+    # 7) 价格带 v0：关键词锚点分域 + 域内价格分位（域样本不足 → unpublished）
+    #    口径提示：docs/02 §6 主判定是 M2 hedonic 残差；本视图是残差就绪前的价格水平分位基线，
+    #    故 band_basis 如实标为 price_level。
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_price_band AS
+        WITH base AS (
+            SELECT la.listing_id, la.game_id, la.game_name, la.task_id, la.title,
+                   la.price_yuan, la.server, la.snapshot_at, la.snapshot_age_h,
+                   la.kw_ceiling_hits, la.kw_floor_hits, la.ceiling_keywords, la.floor_keywords,
+                   CASE WHEN la.kw_floor_hits > 0 THEN 'floor'
+                        WHEN la.kw_ceiling_hits > 0 THEN 'ceiling'
+                        ELSE 'normal' END AS keyword_domain
+            FROM v_listing_analysis la
+            WHERE la.price_yuan IS NOT NULL AND la.price_yuan > 0
+        ), ranked AS (
+            SELECT *, count(*) OVER (PARTITION BY game_id, keyword_domain) AS domain_n,
+                   percent_rank() OVER (PARTITION BY game_id, keyword_domain
+                                        ORDER BY price_yuan) * 100 AS price_pctl_in_domain
+            FROM base
+        )
+        SELECT *,
+               CASE WHEN domain_n < coalesce((SELECT CAST(value AS INTEGER) FROM meta_params
+                                              WHERE key = 'analysis_min_cell_sample'), 30)
+                    THEN 'unpublished'
+                    WHEN price_pctl_in_domain <= 10 THEN 'floor'
+                    WHEN price_pctl_in_domain <= 40 THEN 'low'
+                    WHEN price_pctl_in_domain <= 60 THEN 'fair'
+                    WHEN price_pctl_in_domain <= 90 THEN 'high'
+                    ELSE 'ceiling' END AS price_band,
+               'price_level' AS band_basis,
+               'v0：关键词锚点分域 + 域内价格分位（≤P10 底价 / 10-40 偏低 / 40-60 合理 / 60-90 偏高 / ≥P90 高价）；'
+               '域样本不足即 unpublished；M2 残差分位就绪后替换' AS method
+        FROM ranked
+    """)
+
+    # 8) 捡漏候选 v0（规则版，非 M2 残差）：只从底价/偏低带出，含折价词给 caution
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_deals AS
+        SELECT b.listing_id, b.game_id, b.game_name, b.task_id, b.title, b.price_yuan,
+               b.server, b.snapshot_at, b.snapshot_age_h, b.keyword_domain, b.price_band,
+               round(b.price_pctl_in_domain, 1) AS price_pctl_in_domain, b.domain_n,
+               b.ceiling_keywords, b.floor_keywords,
+               CASE WHEN b.kw_floor_hits > 0
+                    THEN '含折价词（' || coalesce(b.floor_keywords, '') || '）：'
+                         '低价可能来自折价项，需人工复核'
+                    ELSE NULL END AS caution,
+               'v0_rule' AS method
+        FROM v_price_band b
+        WHERE b.price_band IN ('floor', 'low')
+    """)
+
+    # 9) 下架速度（插件通道覆盖不完整 → 下架推断固定关闭，恢复管线前通常为空，设计如此）
+    conn.execute("""
+        CREATE OR REPLACE VIEW v_delist_speed AS
+        SELECT e.listing_id, l.game_id, g.game_name, e.first_seen, e.last_seen,
+               e.days_on_market, e.last_price,
+               CASE WHEN e.days_on_market IS NULL OR e.days_on_market <= 0 THEN NULL
+                    ELSE round(e.last_price / e.days_on_market, 2) END AS price_per_day
+        FROM fct_delist_event e
+        LEFT JOIN dim_listing l ON l.listing_id = e.listing_id
+        LEFT JOIN dim_game g ON g.game_id = l.game_id
+    """)
+
+    return list(ANALYSIS_LAYER)
 
 
 # --------------------------------------------------------------------------- #
@@ -854,18 +1146,39 @@ def fetch_delist_candidates(conn: duckdb.DuckDBPyConnection, *, game_id: int,
 
 def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
                          viewers_masked: int | None,
-                         favorites_cnt: int | None) -> int:
+                         favorites_cnt: int | None,
+                         attributes: Mapping[str, Any] | None = None,
+                         features: Mapping[str, Any] | None = None,
+                         snapshot_at: _dt.datetime | None = None) -> int:
     """把详情页 M5 字段（正在浏览/收藏）回填该 listing **最近一轮**快照。
 
     前端 B 采集插件通道：详情页通常与列表卡片不在同一批到达，这里按 listing 定位
     最新快照行回填。返回更新的行数（0 = 尚无快照行，调用方应暂存待合并）。
     """
+    current = conn.execute(
+        "SELECT snapshot_at, extracted_features FROM fct_listing_snapshot WHERE listing_id = ?"
+        + (" AND snapshot_at = ?" if snapshot_at is not None else "")
+        + " ORDER BY snapshot_at DESC LIMIT 1",
+        [str(listing_id)] + ([snapshot_at] if snapshot_at is not None else [])).fetchone()
+    if current is None:
+        return 0
+    assignments = ["viewers_masked = ?", "favorites_cnt = COALESCE(?, favorites_cnt)"]
+    params: list[Any] = [viewers_masked, favorites_cnt]
+    for name in ("level", "yellow_cnt", "five_star_chars", "five_star_weapons"):
+        if (attributes or {}).get(name) is not None:
+            assignments.append(f"{name} = ?")
+            params.append(attributes[name])
+    if features:
+        merged = json.loads(current[1]) if current[1] else {}
+        merged.update(features)
+        assignments.append("extracted_features = ?")
+        params.append(json.dumps(merged, ensure_ascii=False))
     rows = conn.execute(
-        "UPDATE fct_listing_snapshot SET viewers_masked = ?, favorites_cnt = ?"
-        " WHERE listing_id = ? AND snapshot_at ="
-        " (SELECT max(snapshot_at) FROM fct_listing_snapshot WHERE listing_id = ?)"
+        "UPDATE fct_listing_snapshot SET " + ", ".join(assignments)
+        + " WHERE listing_id = ? AND snapshot_at ="
+        " ?"
         " RETURNING listing_id",
-        [viewers_masked, favorites_cnt, str(listing_id), str(listing_id)]).fetchall()
+        [*params, str(listing_id), current[0]]).fetchall()
     return len(rows)
 
 
@@ -882,6 +1195,7 @@ def table_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, int]:
         " UNION ALL SELECT 'fct_delist_event', count(*) FROM fct_delist_event"
         " UNION ALL SELECT 'fct_event', count(*) FROM fct_event"
         " UNION ALL SELECT 'meta_column_comments', count(*) FROM meta_column_comments"
+        " UNION ALL SELECT 'meta_params', count(*) FROM meta_params"
     ).fetchall())
 
 

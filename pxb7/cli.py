@@ -632,6 +632,62 @@ def _cmd_browser_extension(args: argparse.Namespace) -> int:
     return EXIT_OK if found else EXIT_ERROR
 
 
+def _cmd_prepare_analysis(args: argparse.Namespace) -> int:
+    """分析就绪层：建/重建分析视图（docs/01 §4「分析层」），按需导出 CSV/Parquet + 数据字典。"""
+    from . import analysis
+
+    settings = load_settings(args.settings)
+    if args.db:
+        settings = override_db_path(settings, args.db)
+    result = analysis.prepare_analysis(settings, min_cell_sample=args.min_cell_sample)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        for line in analysis.format_report(result):
+            print(line)
+    if args.out:
+        exported = analysis.export_views(settings, args.out, fmt=args.format,
+                                         game_id=args.game,
+                                         quality=result.get("quality"))
+        print(f"[analysis] 已导出 {len(exported['views'])} 个视图 → {exported['out_dir']}"
+              f"（{exported['format']}，共 {len(exported['files'])} 个文件）")
+        print(f"[analysis] 数据字典（先读这个）：{exported['readme']}")
+    else:
+        print("[analysis] 提示：加 --out DIR 可把视图导出为 CSV/Parquet 并生成数据字典"
+              "（例：run.py prepare-analysis --out data/analysis）")
+    return EXIT_OK
+
+
+def _cmd_export_csv(args: argparse.Namespace) -> int:
+    """把采集数据导出成**一份 CSV**（一行一个 listing：最新价 + 结构化字段 + 词表命中 + 质量标记）。"""
+    from . import analysis
+
+    settings = load_settings(args.settings)
+    if args.db:
+        settings = override_db_path(settings, args.db)
+    analysis.prepare_analysis(settings)          # 先刷新分析视图/样本门槛，保证与库同口径
+    result = analysis.export_main_csv(settings, args.out, game_id=args.game)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return EXIT_OK
+    for line in analysis.export_main_csv_lines(result):
+        print(line)
+    return EXIT_OK
+
+
+def _cmd_split_csv(args: argparse.Namespace) -> int:
+    """把一份 pxb7-listings CSV 按游戏拆成多个表（每游戏一份 CSV，列与源文件一致）。"""
+    from . import analysis
+
+    result = analysis.split_csv_by_game(args.csv_in, out_dir=args.out_dir)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return EXIT_OK
+    for line in analysis.split_csv_lines(result):
+        print(line)
+    return EXIT_OK
+
+
 # --------------------------------------------------------------------------- #
 # 参数定义
 # --------------------------------------------------------------------------- #
@@ -773,6 +829,41 @@ def build_parser() -> argparse.ArgumentParser:
                        help="只看某个浏览器（chrome/edge/quark/brave/vivaldi/qq…；默认全部）")
     p_ext.add_argument("--json", action="store_true", help="以 JSON 输出")
     p_ext.set_defaults(func=_cmd_browser_extension)
+
+    p_an = sub.add_parser(
+        "prepare-analysis",
+        help="分析就绪层：建/重建分析视图（每号最新态/词表命中/价格带/周聚合…），"
+             "可导出 CSV+Parquet 与数据字典")
+    add_common(p_an)
+    p_an.add_argument("--out", metavar="DIR", help="导出目录（缺省只建视图并打印质量摘要）")
+    p_an.add_argument("--format", choices=("csv", "parquet", "both"), default="both",
+                      help="导出格式（默认 both：CSV 便于肉眼，Parquet 便于 pandas/duckdb）")
+    p_an.add_argument("--game", type=int, metavar="GAME_ID",
+                      help="只导出该游戏的行（作用于含 game_id 的视图）")
+    p_an.add_argument("--min-cell-sample", type=int, metavar="N",
+                      help="样本门槛（默认取 settings.quality.min_cell_sample，通常 30）")
+    p_an.add_argument("--json", action="store_true", help="以 JSON 输出摘要")
+    p_an.set_defaults(func=_cmd_prepare_analysis)
+
+    p_csv = sub.add_parser(
+        "export-csv",
+        help="把采集数据导出成一份分析用 CSV（一行一个 listing：最新价 + 结构化字段 + 词表命中 + 质量标记）")
+    add_common(p_csv)
+    p_csv.add_argument("--out", metavar="PATH",
+                       help="输出路径（默认 data/analysis/pxb7-listings-<日期>.csv）")
+    p_csv.add_argument("--game", type=int, metavar="GAME_ID", help="只导出该游戏")
+    p_csv.add_argument("--json", action="store_true", help="以 JSON 输出摘要")
+    p_csv.set_defaults(func=_cmd_export_csv)
+
+    p_split = sub.add_parser(
+        "split-csv",
+        help="把 pxb7-listings CSV 按游戏拆成多个表（每游戏一份 CSV，列与源文件一致，Excel 友好）")
+    p_split.add_argument("--in", dest="csv_in", metavar="PATH", required=True,
+                         help="要拆分的 CSV 路径（如 data/analysis/pxb7-listings-20261003.csv）")
+    p_split.add_argument("--out-dir", metavar="DIR",
+                         help="输出目录（默认源文件同级 by_game/）")
+    p_split.add_argument("--json", action="store_true", help="以 JSON 输出摘要")
+    p_split.set_defaults(func=_cmd_split_csv)
 
     return parser
 
