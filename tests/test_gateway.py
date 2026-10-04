@@ -435,8 +435,12 @@ def test_plugin_config_defaults_and_roundtrip(settings: cfg.Settings) -> None:
         with pytest.raises(G.GatewayError):
             G.save_plugin_config(settings, {"collection_mode": invalid})
     assert saved["title_interval_ms"] == 3000
+    # 2026-10-04 用户指令：全文请求间隔可调 0–10 秒、0.1 秒步进（网关按 100ms 粒度取整）
     assert G.save_plugin_config(settings, {"title_interval_ms":6000})["title_interval_ms"] == 6000
-    for invalid in (0, 1000, 16000):
+    for valid, expect in ((0, 0), (10000, 10000), (3500.4, 3500.0),
+                          (100.00000000000001, 100)):          # JS「秒*1000」浮点误差被取整吸收
+        assert G.save_plugin_config(settings, {"title_interval_ms": valid})["title_interval_ms"] == expect
+    for invalid in (-100, 10001, 15000, "fast", True, float("nan")):
         with pytest.raises(G.GatewayError):
             G.save_plugin_config(settings, {"title_interval_ms":invalid})
     with pytest.raises(G.GatewayError):

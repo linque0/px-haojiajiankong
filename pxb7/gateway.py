@@ -75,7 +75,7 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "reingest_interval_min": 10,   # 同一 URL 的去重间隔（分钟）
     "spa_settle_ms": 2500,         # SPA 路由切换后的渲染等待
     "debug": False,                # 控制台调试日志
-    "title_interval_ms": 3000,     # 完整标题请求完成后的间隔；与同页去重独立
+    "title_interval_ms": 3000,     # 完整标题请求完成后的间隔；0–10 秒（0.1 秒步进），与同页去重独立
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
     "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
     "targets": [],                 # 采集目标：dim_task.task_id 列表；空=只用网关启动任务
@@ -86,7 +86,7 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "reingest_interval_min": (int, (1, 1440)),
     "spa_settle_ms": (int, (500, 30000)),
     "debug": (bool, None),
-    "title_interval_ms": (int, (2000, 15000)),
+    "title_interval_ms": (float, (0, 10000)),
     "cards_target": (int, (1, 200)),
     "collection_mode": (str, None),
 }
@@ -273,6 +273,18 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
                     or int(value) != value:
                 raise GatewayError(f"配置 {key} 必须是整数")
             value = int(value)
+        elif expect_type is float:
+            # title_interval_ms：0–10 秒（界面 0.1 秒步进）。先按原始值做范围判定，再取整到
+            # 100ms 粒度——吸收 JS「秒*1000」的浮点误差（0.1*1000=100.000…1），否则回填
+            # 输入框后 step 校验会失败；先判界保证 10001 不会被取整成合法的 10000。
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise GatewayError(f"配置 {key} 必须是数字")
+            value = float(value)
+            if value != value:                            # NaN
+                raise GatewayError(f"配置 {key} 必须是数字")
+            if bounds is not None and not (bounds[0] <= value <= bounds[1]):
+                raise GatewayError(f"配置 {key}={value} 超出范围 {bounds[0]}–{bounds[1]}")
+            value = round(value / 100) * 100
         elif expect_type is str:
             if value not in ("list", "detail"):
                 raise GatewayError("collection_mode 必须是 list 或 detail")
@@ -868,13 +880,8 @@ _GENERIC_COLUMNS: tuple[tuple[str, str, str], ...] = (
 
 LISTINGS_PAGE_DEFAULT = 15
 LISTINGS_PAGE_MAX = 200
-WUWA_RESOURCES = (
-    ("astrite_cnt", "星声"),
-    ("lunite_cnt", "月相"),
-    ("afterglow_coral_cnt", "余波珊瑚"),
-    ("lustrous_tide_cnt", "浮金波纹"),
-    ("radiant_tide_cnt", "铸潮波纹"),
-)
+# 鸣潮资源口径单一定义在 extract（与付费商品段常量同处）；此处别名引用保持看板渲染不动。
+WUWA_RESOURCES = X.WUWA_RESOURCES
 
 
 def columns_for_game(game_id: int | None) -> tuple[tuple[str, str, str], ...]:

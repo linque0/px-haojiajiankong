@@ -33,7 +33,13 @@
   async function collect(doc, win, options = {}) {
     const refs = references(doc).filter(item => !options.ids || options.ids.includes(item.id));
     const stats = {cards:0, captured:0, requested:0, attempts:0, retried:0, failed:0, stop:"done", titles:{}, errors:[]};
-    stats.interval_ms = Math.max(2000, Math.min(15000, Number(options.intervalMs) || 3000));
+    // 间隔口径与 title-source.js intervalFor 相同：0–10000ms，未提供/非法回落 3000（0 是显式设置）。
+    stats.interval_ms = (() => {
+      const n = Number(options.intervalMs);
+      if (options.intervalMs === undefined || options.intervalMs === null
+          || options.intervalMs === "" || !Number.isFinite(n)) return 3000;
+      return Math.max(0, Math.min(10000, n));
+    })();
     const alive = options.alive || (() => true);
     const getTitle = options.request || ((id, refresh) => request(win, id, {intervalMs:options.intervalMs, refresh}));
     const pause = options.pause || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));

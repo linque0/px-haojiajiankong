@@ -6,7 +6,13 @@
   const nativeFetch = win.fetch.bind(win);
   const cache = new Map();
   let requestHeaders = null, active = false, nextRequest = 0, requestsInBatch = 0;
-  const intervalFor = ms => Math.max(2000, Math.min(15000, Number(ms) || 3000));
+  // 全文请求间隔（毫秒）：0–10000（0–10 秒，0.1 秒步进由设置界面保证）；
+  // 未提供/非法回落默认 3000；0 = 用户显式不等待，不得当缺省吞掉。
+  const intervalFor = ms => {
+    if (ms === undefined || ms === null || ms === "") return 3000;
+    const n = Number(ms);
+    return Number.isFinite(n) ? Math.max(0, Math.min(10000, n)) : 3000;
+  };
   const pause = ms => new Promise(resolve => win.setTimeout(resolve, ms));
   function allowed(url) {
     try {
