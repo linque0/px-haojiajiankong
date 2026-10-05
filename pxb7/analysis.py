@@ -588,7 +588,7 @@ def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *
 
 def sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
                   game_id: int) -> dict[str, Any]:
-    """在采集串行锁内同步该游戏最新态；日期文件保留，固定文件原子替换。
+    """在采集串行锁内同步该游戏最新态，优先原表，原子替换。
 
     鸣潮沿用看板列版式，其余游戏保留完整分析列。文件占用等 I/O 失败
     返回明确状态，已入库数据不回滚；下一次采集会重新导出全部最新态。
@@ -598,8 +598,13 @@ def sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
     label = _INVALID_FILENAME_RE.sub("_", f"{game_name}-{int(game_id)}")
     spec = CURATED_GAME_LAYOUTS.get(int(game_id))
     suffix = "-看板列" if spec else ""
-    path = (Path(settings.project_root) / "data" / "analysis" / "by_game"
-            / f"pxb7-listings-{label}{suffix}.csv")
+    directory = Path(settings.project_root) / "data" / "analysis" / "by_game"
+    filename = f"pxb7-listings-{label}{suffix}.csv"
+    original_pattern = re.compile(
+        rf"^pxb7-listings-\d{{8}}-{re.escape(label + suffix)}\.csv$")
+    originals = sorted(p for p in directory.glob("*.csv")
+                       if original_pattern.fullmatch(p.name))
+    path = originals[0] if originals else directory / filename
     if spec:
         headers, render = spec
         rel = rel.select(*[duckdb.ColumnExpression(c) for c in _CURATED_COLUMNS])

@@ -15,7 +15,12 @@ const GATEWAY = "http://127.0.0.1:8765";
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
 const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail"]);
 importScripts("collection.js");
-const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)));
+// 详情队列的间隔来自网关 /config（deps.getConfig）；列表模式不经此路径，两者互不共用。
+const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)),
+  { getConfig: async () => {
+      const res = await gfetch("/config");
+      return (res && res.data && res.data.config) || {};
+    } });
 
 // 自更新：解包扩展的「重新加载」按浏览器是手动操作（Chrome/Edge/夸克都忽略命令行里的
 // chrome:// 地址），但扩展可以重载自己——chrome.runtime.reload() 会按磁盘目录重新读取。

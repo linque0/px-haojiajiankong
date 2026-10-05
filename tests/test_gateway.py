@@ -39,7 +39,7 @@ def _post(state: G.GatewayState, path: str, payload: dict) -> tuple[int, dict]:
 @pytest.fixture()
 def settings(tmp_path: Path) -> cfg.Settings:
     base = cfg.load_settings()
-    return dataclasses.replace(base, paths=dataclasses.replace(
+    return dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "gw.duckdb", raw_root=tmp_path / "raw",
         state_dir=tmp_path / "state", runs=tmp_path / "runs",
         risk_state=tmp_path / "risk.json"))
@@ -443,6 +443,13 @@ def test_plugin_config_defaults_and_roundtrip(settings: cfg.Settings) -> None:
     for invalid in (-100, 10001, 15000, "fast", True, float("nan")):
         with pytest.raises(G.GatewayError):
             G.save_plugin_config(settings, {"title_interval_ms":invalid})
+    # 详情采集间隔（2026-10-05 用户指令）：与列表间隔互不共用，同口径 0–10000ms
+    assert saved["detail_interval_ms"] == 0
+    for valid, expect in ((10000, 10000), (3500.4, 3500.0), (100.00000000000001, 100)):
+        assert G.save_plugin_config(settings, {"detail_interval_ms": valid})["detail_interval_ms"] == expect
+    for invalid in (-100, 10001, "fast", True):
+        with pytest.raises(G.GatewayError):
+            G.save_plugin_config(settings, {"detail_interval_ms":invalid})
     with pytest.raises(G.GatewayError):
         G.save_plugin_config(settings, {"unknown": 1})                     # 未知键
     with pytest.raises(G.GatewayError):

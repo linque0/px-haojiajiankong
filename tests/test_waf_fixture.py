@@ -98,7 +98,7 @@ def _waf_settings(tmp_path: Path):
     from pxb7 import config as cfg
 
     base = cfg.load_settings()
-    return dataclasses.replace(base, paths=dataclasses.replace(
+    return dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "replay.duckdb", raw_root=tmp_path / "raw",
         risk_state=tmp_path / "risk.json"))
 
@@ -175,7 +175,7 @@ def test_pipeline_aborts_and_writes_summary_on_waf_page(tmp_path, monkeypatch) -
     from tests.test_collector import FixedRng, StubSession, list_html  # noqa: F401
 
     base = cfg.load_settings()
-    settings = dataclasses.replace(base, paths=dataclasses.replace(
+    settings = dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "waf.duckdb", raw_root=tmp_path / "raw",
         risk_state=tmp_path / "risk.json"))
     db.init_db(settings.paths.db)

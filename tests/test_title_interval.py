@@ -45,3 +45,23 @@ def test_titles_stats_interval_clamp_0_to_10000() -> None:
     assert "Math.max(2000" not in js, "旧的 2 秒下限必须移除"
     # 整页结束后补采一轮的暂停保留 6 秒下限（间隔归 0 时的兜底护栏，docs/10 §4.3）
     assert "Math.max(6000" in js
+
+
+def test_detail_interval_separate_from_list() -> None:
+    """详情采集间隔独立于列表间隔（2026-10-05 用户指令）：双输入框 + 互斥启停 + 独立配置键。"""
+    popup_html = _read(EXT / "popup.html")
+    dashboard = _read(DASHBOARD)
+    popup_js = _read(EXT / "popup.js")
+    assert 'id="c-detail-interval" min="0" max="10" step="0.1"' in popup_html
+    assert 'id="c-detail-interval" min="0" max="10" step="0.1"' in dashboard
+    assert 'detail_interval_ms: Number($("c-detail-interval").value) * 1000' in popup_js
+    assert 'detail_interval_ms: Number($("c-detail-interval").value) * 1000' in dashboard
+    # 弹窗按模式互斥启停：详情模式启用详情间隔、停用列表间隔
+    assert '$("c-title-interval").disabled = detail;' in popup_js
+    assert '$("c-detail-interval").disabled = !detail;' in popup_js
+    # 详情队列独立取值：collection.js 的钳制与网关配置键
+    queue_js = _read(EXT / "collection.js")
+    assert "clampInterval" in queue_js and "Math.min(10000" in queue_js
+    assert "config.detail_interval_ms" in queue_js, "队列应从网关配置读取详情间隔"
+    py = PROJECT_ROOT / "pxb7" / "gateway.py"
+    assert '"detail_interval_ms": (float, (0, 10000))' in _read(py)

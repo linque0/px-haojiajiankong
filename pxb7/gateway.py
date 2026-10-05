@@ -76,6 +76,7 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "spa_settle_ms": 2500,         # SPA 路由切换后的渲染等待
     "debug": False,                # 控制台调试日志
     "title_interval_ms": 3000,     # 完整标题请求完成后的间隔；0–10 秒（0.1 秒步进），与同页去重独立
+    "detail_interval_ms": 0,       # 详情页采集的逐张间隔；0–10 秒（0.1 秒步进），与列表间隔互相独立
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
     "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
     "targets": [],                 # 采集目标：dim_task.task_id 列表；空=只用网关启动任务
@@ -87,6 +88,7 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "spa_settle_ms": (int, (500, 30000)),
     "debug": (bool, None),
     "title_interval_ms": (float, (0, 10000)),
+    "detail_interval_ms": (float, (0, 10000)),
     "cards_target": (int, (1, 200)),
     "collection_mode": (str, None),
 }
@@ -528,7 +530,7 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
 
     entry = {"listing_id": listing_id, "viewers_masked": fields["viewers_masked"],
              "favorites_cnt": fields["favorites_cnt"], "attributes": attributes,
-             "features": extraction.features, "snapshot_at": snapshot_at}
+             "features": extraction.features, "snapshot_at": snapshot_at, "game_id": game_id}
     updated = _apply_detail(state, entry)
     if snapshot_at is not None and not updated:
         return 409, {"ok": False, "error": "snapshot-round-not-found"}
@@ -547,7 +549,8 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
            "weapon_details_complete": (bool(attributes.get("five_star_weapons"))
                                        and len(extraction.features.get("five_star_weapon_refinements") or [])
                                        == attributes.get("five_star_weapons")),
-           "snapshot_rows_updated": updated}
+           "snapshot_rows_updated": updated,
+           "analysis_sync": entry.get("analysis_sync")}
     if not updated:
         ack["pending"] = ("尚无该 listing 的快照行，详情字段已暂存，"
                           "将随下一批 /ingest/cards 一并入库")
@@ -565,6 +568,11 @@ def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
                 favorites_cnt=entry.get("favorites_cnt"),
                 attributes=entry.get("attributes"), features=entry.get("features"),
                 snapshot_at=entry.get("snapshot_at"))
+            if updated:
+                from .analysis import sync_game_csv
+                game = conn.execute("SELECT game_id FROM dim_listing WHERE listing_id = ?",
+                                    [entry["listing_id"]]).fetchone()
+                entry["analysis_sync"] = sync_game_csv(state.settings, conn, game_id=game[0])
         finally:
             conn.close()
     if not updated and entry.get("snapshot_at") is None:
@@ -737,6 +745,7 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                  "snapshots_inserted": load_stats.snapshots_inserted,
                  "new_listings": load_stats.new_listings,
                  "extract_hit_rate": summary["extract_hit_rate"],
+                 "analysis_sync": load_stats.analysis_sync,
                  "field_diagnostics": PL.aggregate_field_diagnostics(list_result)}
 
 

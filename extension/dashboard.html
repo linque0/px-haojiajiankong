@@ -224,11 +224,12 @@
       <label>每次采集张数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
       <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="0" max="10" step="0.1"></label>
+      <label>详情采集间隔（秒）<input type="number" id="c-detail-interval" min="0" max="10" step="0.1"></label>
       <label><input type="checkbox" id="c-debug"> 调试日志（控制台）</label>
       <p class="muted" style="margin:2px 0 0">
         扩展支持 1～200 任意整数，只采前 N 个唯一商品；不足时滚动加载更多，连续两轮无新增即停。详情模式复用一个后台标签页逐个采集，标题就绪即读取，无逐商品固定等待。<br>
         去重间隔：同一标签页会话内，同一网址成功自动采集后再次自动采集的最短间隔；手动采集不受限制。<br>
-        SPA 等待：站内路由切换后给页面渲染预留的等待；详情队列不逐张套用。全文请求间隔仅用于列表模式。采集进度和取消操作在扩展弹窗中。</p>
+        SPA 等待：站内路由切换后给页面渲染预留的等待；详情队列不逐张套用。全文请求间隔仅用于列表模式，详情采集间隔仅用于详情页采集（第 2 张起生效），两种间隔相互独立。采集任务内自动按商品编号去重并计数，不会重复采集同一账号。采集进度和取消操作在扩展弹窗中。</p>
       <div style="margin-top:10px">
         <button id="save">保存设置</button>
         <button class="ghost" id="reset">恢复默认</button>
@@ -482,6 +483,7 @@ function fillConfig(c) {
   $("c-cards").value = c.cards_target || 16;
   $("c-settle").value = c.spa_settle_ms;
   $("c-title-interval").value = (c.title_interval_ms || 3000) / 1000;
+  $("c-detail-interval").value = (c.detail_interval_ms ?? 0) / 1000;
   $("c-debug").checked = !!c.debug;
 }
 
@@ -508,11 +510,12 @@ $("save").addEventListener("click", () => saveConfig({
   cards_target: Number($("c-cards").value),
   spa_settle_ms: Number($("c-settle").value),
   title_interval_ms: Number($("c-title-interval").value) * 1000,
+  detail_interval_ms: Number($("c-detail-interval").value) * 1000,
   debug: $("c-debug").checked,
 }));
 $("reset").addEventListener("click", () => saveConfig({
   collection_mode: "list", auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
-  spa_settle_ms: 2500, debug: false, title_interval_ms:3000 }));
+  spa_settle_ms: 2500, debug: false, title_interval_ms:3000, detail_interval_ms:0 }));
 
 $("targets-all").addEventListener("click", () => {
   const ids = Array.from($("targets").querySelectorAll("input[data-task]:not(:disabled)"))

@@ -29,7 +29,8 @@
   <label>每次采集张数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>
   <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
   <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="0" max="10" step="0.1" value="3"></label>
-  <div class="muted">全文请求间隔仅用于列表模式；详情模式内容就绪即采集，不加固定间隔。</div>
+  <label>详情采集间隔(秒) <input type="number" id="c-detail-interval" min="0" max="10" step="0.1" value="0"></label>
+  <div class="muted">两种间隔相互独立、分别只作用于各自模式：全文请求间隔仅用于列表模式（第 2 次请求起生效）；详情采集间隔仅用于详情页采集（第 2 张详情起生效，0 = 不等待）。</div>
   <label><input type="checkbox" id="c-debug"> 调试日志</label>
   <div class="muted">默认 16 张；支持 1～200 任意整数，仅采前 N 个唯一商品；不足时尝试滚动加载更多，无法继续加载会提示实际数量。直接在详情页采集时仅采当前商品。</div>
   <div class="setting-help"><b>去重间隔：</b>同一标签页会话内，同一网址成功自动采集后，多久才能再次自动采集。手动「采集本页」不受此限制；它不是商品间的等待时间。<br><b>SPA 等待：</b>站内切换路由后，给页面渲染预留的等待时间。详情队列直接观察标题就绪，不逐张应用此等待。</div>

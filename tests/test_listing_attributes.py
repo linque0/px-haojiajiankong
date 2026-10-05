@@ -29,7 +29,7 @@ def detail_html():
 @pytest.fixture
 def state(tmp_path):
     base = cfg.load_settings()
-    settings = dataclasses.replace(base, paths=dataclasses.replace(
+    settings = dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / 'fields.duckdb', raw_root=tmp_path / 'raw',
         state_dir=tmp_path / 'state', runs=tmp_path / 'runs', risk_state=tmp_path / 'risk.json'))
     db.init_db(settings.paths.db)

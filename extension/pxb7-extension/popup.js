@@ -176,12 +176,15 @@ function renderPaths(p) {
 
 let settingsDirty = false;
 function modeHelp() {
-  $("mode-help").textContent = $("c-mode").value === "detail"
+  const detail = $("c-mode").value === "detail";
+  $("mode-help").textContent = detail
     ? "从列表保存清单和价格，再逐个打开详情采集；关闭弹窗仍可继续。切换方式用于下一次任务。"
     : "读取列表全文；缺失时按商品编号限速获取，可能受网站预检限制。";
-  $("c-title-interval").disabled = $("c-mode").value === "detail";
+  // 两种间隔互不共用：详情模式启用详情间隔、停用列表间隔；列表模式相反。
+  $("c-title-interval").disabled = detail;
+  $("c-detail-interval").disabled = !detail;
 }
-["c-mode", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-debug"].forEach(id => {
+["c-mode", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-detail-interval", "c-debug"].forEach(id => {
   $(id).addEventListener("input", () => {settingsDirty = true; modeHelp();});
 });
 function renderProgress(p) {
@@ -235,12 +238,13 @@ async function refresh() {
   $("c-cards").value = c.cards_target || 16;
   $("c-settle").value = c.spa_settle_ms;
   $("c-title-interval").value = (c.title_interval_ms || 3000) / 1000;
+  $("c-detail-interval").value = (c.detail_interval_ms ?? 0) / 1000;
   $("c-debug").checked = !!c.debug;
 }
 
 // ---------- 操作 ----------
 async function saveSettings() {
-  for (const id of ["c-cards", "c-interval", "c-settle", "c-title-interval"]) {
+  for (const id of ["c-cards", "c-interval", "c-settle", "c-title-interval", "c-detail-interval"]) {
     if (!$(id).checkValidity()) {$(id).reportValidity(); return false;}
   }
   const res = await gfetch("/config", {
@@ -252,6 +256,7 @@ async function saveSettings() {
       cards_target: Number($("c-cards").value),
       spa_settle_ms: Number($("c-settle").value),
       title_interval_ms: Number($("c-title-interval").value) * 1000,
+      detail_interval_ms: Number($("c-detail-interval").value) * 1000,
       debug: $("c-debug").checked,
     }),
   });

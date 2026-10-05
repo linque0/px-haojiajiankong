@@ -3,7 +3,7 @@ const {create} = require('../extension/pxb7-extension/collection.js');
 const {clampTarget} = require('../extension/pxb7-extension/sweep.js');
 const source = {tab:{id:10, url:'https://www.pxb7.com/buy/10302/1'}, url:'https://www.pxb7.com/buy/10302/1'};
 const items = Array.from({length:17}, (_,i) => ({id:String(123456+i),url:`https://www.pxb7.com/product/${123456+i}/1`,prefix:'80级'}));
-function fixture() {
+function fixture(deps) {
   const storage = {}, navigations=[], closed=[], ingested=[], messages=[], alarms={};
   const chrome = {
     storage:{local:{async get(k){return structuredClone({[k]:storage[k]});},async set(v){Object.assign(storage,structuredClone(v));}}},
@@ -13,13 +13,13 @@ function fixture() {
   };
   let response = {ok:true,data:{ok:true,snapshot_rows_updated:1}};
   const ingest = async (path, payload) => {ingested.push({path,payload});return response;};
-  return {queue:create(chrome,ingest), restart:()=>create(chrome,ingest), navigations, closed, ingested, messages, alarms,
+  return {queue:create(chrome,ingest,deps), restart:()=>create(chrome,ingest,deps), navigations, closed, ingested, messages, alarms,
     setResponse:v=>response=v};
 }
-async function start(f, n=17) {
+async function start(f, n=17, extra) {
   const begin = await f.queue.begin(source,{mode:'detail',total:n});
   assert.equal(begin.ok,true);
-  const reply = await f.queue.start(source,{taskId:begin.taskId,items:items.slice(0,n),round:'2026-10-04T09:00:00'});
+  const reply = await f.queue.start(source,{taskId:begin.taskId,items:items.slice(0,n),round:'2026-10-04T09:00:00',...extra});
   assert.equal(reply.ok,true);
   return begin.taskId;
 }
@@ -84,5 +84,41 @@ async function ready(queue, url) {
   assert.equal((await quality.queue.progress()).progress.status,'partial');
   assert.equal((await quality.queue.progress()).progress.incomplete,1);
   assert.equal(quality.messages.length,0,'武器不完整不能设源页去重成功');
-  console.log('queue lifecycle, restart, cancellation, failure, scope and arbitrary count: PASS');
+
+  // 详情采集间隔（2026-10-05 用户指令）：与列表模式互不共用；第 2 张起生效，0.1 秒粒度
+  const paced = fixture({getConfig: async () => ({detail_interval_ms: 200})});
+  const pacedId = await start(paced,2);                       // 配置 200ms
+  const pacedJob = await ready(paced.queue,items[0].url);
+  let t0 = Date.now();
+  await paced.queue.result({tab:{id:20}}, {taskId:pacedId,nonce:pacedJob.nonce,
+    payload:{listing_id:pacedJob.id,url:pacedJob.url,html:'完整标题'}});
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed >= 190, `第 2 张前应等待详情间隔（实际 ${elapsed}ms）`);
+  assert.equal(paced.navigations.length,2,'间隔后仍推进到下一张');
+  assert.equal((await paced.queue.progress()).progress.succeeded,1);
+  // 消息显式携带优先于配置：0 覆盖配置 → 不等待
+  const unpaced = fixture({getConfig: async () => ({detail_interval_ms: 5000})});
+  const unpacedId = await start(unpaced,2,{detail_interval_ms:0});
+  const unpacedJob = await ready(unpaced.queue,items[0].url);
+  t0 = Date.now();
+  await unpaced.queue.result({tab:{id:20}}, {taskId:unpacedId,nonce:unpacedJob.nonce,
+    payload:{listing_id:unpacedJob.id,url:unpacedJob.url,html:'完整标题'}});
+  assert.ok(Date.now() - t0 < 150, '显式 0 = 不等待');
+  assert.equal(unpaced.navigations.length,2);
+  // 非法/缺省回落 0（无 getConfig、配置为垃圾值）
+  const bare = fixture(); const bareId = await start(bare,1,{detail_interval_ms:'fast'});
+  assert.equal((await bare.queue.progress()).progress.detail_interval_ms,0);
+  const fromConfig = fixture({getConfig: async () => ({detail_interval_ms: 3500.4})});
+  await start(fromConfig,1);
+  assert.equal((await fromConfig.queue.progress()).progress.detail_interval_ms,3500,'0.1 秒粒度取整');
+
+  // 重复账号检查：队列内按商品编号去重，计数可见且不入库
+  const dup = fixture();
+  const dupList = [items[0], items[1], {...items[1]}, {...items[1]}, items[2]];
+  const dupBegin = await dup.queue.begin(source,{mode:'detail',total:5});
+  await dup.queue.start(source,{taskId:dupBegin.taskId,items:dupList,round:'2026-10-04T09:30:00'});
+  const dupProgress = (await dup.queue.progress()).progress;
+  assert.equal(dupProgress.duplicates,2,'重复商品计数 = 2');
+  assert.equal(dupProgress.total,3,'去重后仅 3 个唯一商品');
+  console.log('detail interval pacing and duplicate guard: PASS');
 })().catch(error=>{console.error(error);process.exitCode=1;});

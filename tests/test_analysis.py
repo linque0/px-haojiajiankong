@@ -28,7 +28,7 @@ from pxb7 import extract as X  # noqa: E402
 @pytest.fixture()
 def settings(tmp_path: Path) -> cfg.Settings:
     base = cfg.load_settings()
-    return dataclasses.replace(base, paths=dataclasses.replace(
+    return dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "an.duckdb", raw_root=tmp_path / "raw",
         state_dir=tmp_path / "state", runs=tmp_path / "runs",
         risk_state=tmp_path / "risk.json"))

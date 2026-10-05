@@ -16,7 +16,8 @@
 
   // 远端可配置项（看板/弹窗设置区写入网关 /config，脚本定期拉取应用）
   let CONFIG = { auto_ingest: true, reingest_interval_min: 10, spa_settle_ms: 2500,
-                 debug: false, cards_target: 16, title_interval_ms:3000, collection_mode:"list" };
+                 debug: false, cards_target: 16, title_interval_ms:3000,
+                 detail_interval_ms:0, collection_mode:"list" };
 
   // 采集目标（网关下发）：列表页按 URL 的 game_id 预检；详情页 URL 不含游戏 → 交网关裁决
   let TARGETS = null;      // {mode, tasks:[...], games:[...]}；null=未获取（放行，最终由网关裁决）
@@ -343,7 +344,8 @@
         const title = item.card.querySelector(".smallCardTitle, .bigCardTitle");
         return {id:item.id, url:item.url, prefix:title ? title.getAttribute("productname") || title.textContent || "" : ""};
       });
-      const result = await bg({type:"detail-start", taskId, items, round:first.data.round});
+      const result = await bg({type:"detail-start", taskId, items, round:first.data.round,
+                               detail_interval_ms:CONFIG.detail_interval_ms});
       if (!result.ok) return fail(result.err || "详情队列启动失败");
       show(`详情队列已启动，共 ${total} 张；进度见扩展弹窗`, true);
       // 详情全部成功才在源列表标记去重；由下方状态轮询确认。

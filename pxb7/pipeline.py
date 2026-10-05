@@ -110,6 +110,7 @@ class LoadStats:
     delist_inferred: bool = False
     delist_skip_reason: str | None = None
     skipped_reason: str | None = None
+    analysis_sync: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +123,7 @@ class LoadStats:
             "delist_inferred": self.delist_inferred,
             "delist_skip_reason": self.delist_skip_reason,
             "skipped_reason": self.skipped_reason,
+            "analysis_sync": self.analysis_sync,
         }
 
 
@@ -266,6 +268,8 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
         stats.delist_inferred = True
     else:
         stats.delist_skip_reason = delist_skip_reason or "not-inferred"
+    from .analysis import sync_game_csv
+    stats.analysis_sync = sync_game_csv(settings, conn, game_id=task.game_id)
     return stats
 
 

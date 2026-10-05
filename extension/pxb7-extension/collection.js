@@ -3,7 +3,17 @@
   "use strict";
   const KEY = "pxb7-collection", ALARM = "pxb7-detail-watchdog";
   const active = task => task && task.status === "running";
-  function create(chrome, ingest) {
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  // 详情采集间隔（毫秒）：0–10000、0.1 秒粒度取整（与网关 title_interval_ms 同口径）；
+  // 未提供/非法回落 0（保持既有行为：不等待）；0 = 用户显式不等待。
+  function clampInterval(ms) {
+    if (ms === undefined || ms === null || ms === "") return 0;
+    const n = Number(ms);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(10000, Math.round(n / 100) * 100));
+  }
+  function create(chrome, ingest, deps = {}) {
+    const getConfig = deps.getConfig || (async () => ({}));
     let chain = Promise.resolve();
     const serial = fn => {
       const result = chain.then(fn);
@@ -39,7 +49,14 @@
         return finish(task, task.failed || task.incomplete || task.items.length < task.requested ? "partial" : "done",
           `采集结束：入库 ${task.succeeded}，失败 ${task.failed}`
           + (task.incomplete ? `；${task.incomplete} 张武器信息未完整公示` : "")
+          + (task.duplicates ? `；去重跳过 ${task.duplicates} 个重复商品` : "")
           + (task.items.length < task.requested ? `；仅加载出 ${task.items.length}/${task.requested} 张` : ""));
+      }
+      // 详情采集间隔：第 2 张起生效（首张立即开始）；独立于列表模式的全文间隔。
+      if (task.processed > 0 && task.detail_interval_ms > 0) {
+        task.phase = `间隔等待 ${Math.round(task.detail_interval_ms / 100) / 10} 秒…`;
+        await save(task);
+        await pause(task.detail_interval_ms);
       }
       task.nonce = `${task.id}:${task.processed}:${Date.now()}`;
       task.currentId = task.items[task.processed].id;
@@ -98,15 +115,26 @@
         if (!active(task) || task.id !== msg.taskId || task.sourceTab !== sender.tab?.id || task.workerTab) return {ok:false, err:"任务已取消或变化"};
         if (typeof msg.round !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(msg.round)) return finish(task,"error","列表轮次无效，详情采集未启动");
         const items = [], seen = new Set();
+        let duplicates = 0;
         for (const item of Array.isArray(msg.items) ? msg.items.slice(0, task.requested) : []) {
           let url;
           try { url = new URL(item.url); } catch (_) { continue; }
           const match = url.pathname.match(/^\/product\/(\d{6,24})(?:\/|$)/);
-          if (url.origin !== "https://www.pxb7.com" || !match || match[1] !== item.id || seen.has(item.id)) continue;
+          if (url.origin !== "https://www.pxb7.com" || !match || match[1] !== item.id) continue;
+          if (seen.has(item.id)) { duplicates++; continue; }   // 重复账号不入队，计数可见
           seen.add(item.id);
           items.push({id:item.id, url:url.href, prefix:String(item.prefix || "").slice(0, 500)});
         }
         if (!items.length) return finish(task,"error","没有可用的商品详情链接");
+        // 详情采集间隔（独立于列表模式）：消息显式携带优先，其次网关配置；都无 → 0（不等待）
+        if (msg.detail_interval_ms !== undefined) {
+          task.detail_interval_ms = clampInterval(msg.detail_interval_ms);
+        } else {
+          let config = {};
+          try { config = await getConfig() || {}; } catch (_) { /* 网关不可达按 0 处理 */ }
+          task.detail_interval_ms = clampInterval(config.detail_interval_ms);
+        }
+        task.duplicates = duplicates;
         task.items = items; task.total = items.length; task.round = msg.round;
         try {
           const tab = await chrome.tabs.create({url:"about:blank", active:false});
