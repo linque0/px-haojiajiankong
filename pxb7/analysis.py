@@ -323,11 +323,12 @@ def export_main_csv(settings: Settings, out_path: str | Path | None = None, *,
     - 编码 UTF-8 且带 BOM：Excel 双击直接打开不乱码（pandas 读用 encoding="utf-8-sig"）；
     - 列 = 分析主表 `v_listing_analysis` 的全部列（不裁剪，避免隐藏信息）；
       列名保持中性，按游戏的术语对应关系见返回的 `column_notes` 与数据字典；
-    - 默认路径：`data/analysis/pxb7-listings-<日期>.csv`；`--game` 可只导一个游戏。
+    - 默认路径：`data/analysis/pxb7-listings.csv`（**固定名，持续更新**：每次导出以库内
+      最新态整体覆盖，2026-10-05 用户指令起不再按日期另起新文件；日期版文件为历史快照保留）；
+    - `--game` 可只导一个游戏。
     """
     path = (Path(out_path).expanduser().resolve() if out_path is not None
-            else (Path(settings.project_root) / "data" / "analysis"
-                  / f"pxb7-listings-{_dt.datetime.now().strftime('%Y%m%d')}.csv"))
+            else (Path(settings.project_root) / "data" / "analysis" / "pxb7-listings.csv"))
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with db.connect(settings.paths.db, read_only=True) as conn:
@@ -543,7 +544,9 @@ def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *
 
     - 编码 UTF-8 带 BOM；与 export_main_csv 同源（v_listing_analysis），列做精选与重命名；
     - `game_id` 必填且必须已登记版式（CURATED_GAME_LAYOUTS），否则明确报错不猜测；
-    - 默认路径：`data/analysis/by_game/pxb7-listings-<日期>-<游戏名>-<game_id>-看板列.csv`。
+    - 默认路径：`data/analysis/by_game/pxb7-listings-<游戏名>-<game_id>-看板列.csv`
+      （**固定名，持续更新**：每次导出以库内最新态整体覆盖，2026-10-05 用户指令起
+      不再按日期另起新文件）。
     """
     if game_id is None:
         raise ValueError("看板列导出需要 --game（版式按游戏登记，不做通用猜测）")
@@ -564,8 +567,7 @@ def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *
 
     if out_path is None:
         out_path = (Path(settings.project_root) / "data" / "analysis" / "by_game"
-                    / f"pxb7-listings-{_dt.datetime.now().strftime('%Y%m%d')}"
-                      f"-{game_name}-{int(game_id)}-看板列.csv")
+                    / f"pxb7-listings-{game_name}-{int(game_id)}-看板列.csv")
     path = Path(out_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = [render(dict(zip(names, row))) for row in rows_raw]

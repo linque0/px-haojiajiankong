@@ -20,12 +20,13 @@
 二、重填（必须走既有管线，不手工造数、不从网页抓数）
 3) 重建分析视图并导出主表：
    .venv/Scripts/python.exe run.py export-csv --game <gameId>
-   产出 data/analysis/pxb7-listings-<当日日期>.csv（一行 = 一个 listing 的最新一轮，
+   产出 data/analysis/pxb7-listings.csv（一行 = 一个 listing 的最新一轮，
    来源视图 v_listing_analysis，UTF-8 带 BOM，列 = 该视图全部列）。
 4) 按游戏拆分：
-   .venv/Scripts/python.exe run.py split-csv --in data/analysis/pxb7-listings-<当日日期>.csv
-   得到 data/analysis/by_game/pxb7-listings-<日期>-<游戏名>-<gameId>.csv。
-5) 旧日期的分表文件保留，不覆盖、不删除；data/analysis/ 与 *.duckdb 均不入 git。
+   .venv/Scripts/python.exe run.py split-csv --in data/analysis/pxb7-listings.csv
+   得到 data/analysis/by_game/pxb7-listings-<游戏名>-<gameId>.csv。
+5) 输出为固定名文件、每次整体覆盖更新（2026-10-05 用户指令，不再按日期另起新文件）；
+   此前按日期生成的历史快照文件保留不动；data/analysis/ 与 *.duckdb 均不入 git。
 
 三、验收（逐项报数，全过才算完成）
 6) 行数 = v_listing_analysis 中该游戏的行数；listing_id 无重复。
@@ -51,10 +52,11 @@
 - 需要鸣潮的**「看板列」版式**（14 列：listing_id/游戏/价格 ¥/等级/黄数/五星角色/五星武器/
   共鸣链（N命）/武器精炼（精N）/资源/额外付费商品/区服/商品发布时间/收藏，2026-10-04
   用户指定）时，在重填后追加：
-  `run.py export-csv --game <gameId> --layout game` → `by_game/pxb7-listings-<日期>-鸣潮-10302-看板列.csv`；
-  该版式按游戏登记（当前仅鸣潮），未登记的游戏会明确报错（docs/05 §看板列导出）。
-- 输出文件按**导出当日日期**命名：同一天重跑会覆盖当天的同名文件（重导以最新库态为准），
-  不同日期各存一份历史表；这是既有管线行为，提示词不改变它。
+  `run.py export-csv --game <gameId> --layout game` → `by_game/pxb7-listings-鸣潮-10302-看板列.csv`
+  （固定名持续更新）；该版式按游戏登记（当前仅鸣潮），未登记的游戏会明确报错
+  （docs/05 §看板列导出）。
+- 输出文件为**固定名，持续更新**（2026-10-05 用户指令）：每次导出以库内最新态整体覆盖
+  同一文件，不再按日期另起新文件；带日期的旧文件是历史快照，保留不动。
 - 「重填」的口径 = `v_listing_analysis`（每号最新一轮）：老 listing 若被重新采到会更新为其
   最新快照；未再浏览到的老号保留其最后一次快照，不丢行。
 - 需要并行重填多个游戏时，把 §1 的任务段按游戏重复执行即可；`export-csv` 不带 `--game`

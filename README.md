@@ -248,20 +248,23 @@ pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py session-ga
 
 ```bat
 :: ① 一份 CSV（一行 = 一个 listing 的最新一轮：价格 + 结构化字段 + 词表命中 + 质量标记）
-::    默认写到 data/analysis/pxb7-listings-<日期>.csv；UTF-8 带 BOM，Excel 双击可看中文
+::    默认写到 data/analysis/pxb7-listings.csv（固定名持续更新：每次导出以库内最新态
+::    整体覆盖同一文件，2026-10-05 起不再按日期另起新文件）；UTF-8 带 BOM，Excel 双击可看中文
 pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py export-csv
 :: 只导某个游戏（gameId 见 config/tasks.yaml / docs/02 §2）
 pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py export-csv --game 10302
 
 :: 按游戏「看板列」版式导出（列名用该游戏词表说法；鸣潮=共鸣链（N命）/武器精炼（精N）/
 ::   资源（星声/月相/余波珊瑚/浮金波纹/铸潮波纹）/额外付费商品（车架模组/摩托饰品/人物皮肤）…）
+::   输出 by_game\pxb7-listings-鸣潮-10302-看板列.csv（同样固定名持续更新）
 pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py export-csv --game 10302 --layout game
 
 :: ② 分析视图全套 + 数据字典（要 CSV 之外的 Parquet/多表时用）
 pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py prepare-analysis --out pxb7-price-monitor\data\analysis
 
-:: ③ 把导出的 CSV 按游戏拆成多个表（每游戏一份，列与源文件一致；默认输出到同级 by_game\）
-pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py split-csv --in pxb7-price-monitor\data\analysis\pxb7-listings-20261003.csv
+:: ③ 把导出的 CSV 按游戏拆成多个表（每游戏一份，列与源文件一致；默认输出到同级 by_game\，
+::    文件名 = 源文件名-游戏标签，源为固定名时输出也是固定名）
+pxb7-price-monitor\.venv\Scripts\python.exe pxb7-price-monitor\run.py split-csv --in pxb7-price-monitor\data\analysis\pxb7-listings.csv
 ```
 
 - 视图：`v_listing_latest`（每号最新态）、`v_listing_analysis`（分析主表，CSV 的来源）、

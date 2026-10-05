@@ -913,7 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="把采集数据导出成一份分析用 CSV（一行一个 listing：最新价 + 结构化字段 + 词表命中 + 质量标记）")
     add_common(p_csv)
     p_csv.add_argument("--out", metavar="PATH",
-                       help="输出路径（默认 data/analysis/pxb7-listings-<日期>.csv）")
+                       help="输出路径（默认 data/analysis/pxb7-listings.csv，固定名持续更新）")
     p_csv.add_argument("--game", type=int, metavar="GAME_ID", help="只导出该游戏")
     p_csv.add_argument("--layout", choices=("full", "game"), default="full",
                        help="full=分析主表全列（默认）；game=该游戏「看板列」精选版式"
