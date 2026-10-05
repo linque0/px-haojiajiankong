@@ -27,7 +27,9 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import json
+import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -229,17 +231,19 @@ def prepare_analysis(settings: Settings, *, min_cell_sample: int | None = None,
 
     if conn is not None:
         views = db.ensure_analysis_views(conn, min_cell_sample=size)
+        game_schemas = db.ensure_game_schemas(conn)
         return {"db_path": str(settings.paths.db), "min_cell_sample": size,
                 "views": views, "view_rows": view_counts(conn),
-                "quality": quality_summary(conn)}
+                "game_schemas": game_schemas, "quality": quality_summary(conn)}
 
     from .pipeline import run_lock            # 延迟导入：避免 db/config 层反向依赖
     with run_lock(settings):
         with db.connect(settings.paths.db) as own:
             views = db.ensure_analysis_views(own, min_cell_sample=size)
+            game_schemas = db.ensure_game_schemas(own)
             return {"db_path": str(settings.paths.db), "min_cell_sample": size,
                     "views": views, "view_rows": view_counts(own),
-                    "quality": quality_summary(own)}
+                    "game_schemas": game_schemas, "quality": quality_summary(own)}
 
 
 # --------------------------------------------------------------------------- #
@@ -582,6 +586,56 @@ def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *
             "game_name": game_name, "bytes": path.stat().st_size}
 
 
+def sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
+                  game_id: int) -> dict[str, Any]:
+    """在采集串行锁内同步该游戏最新态；日期文件保留，固定文件原子替换。
+
+    鸣潮沿用看板列版式，其余游戏保留完整分析列。文件占用等 I/O 失败
+    返回明确状态，已入库数据不回滚；下一次采集会重新导出全部最新态。
+    """
+    rel = _relation_for(conn, MAIN_CSV_VIEW, game_id)
+    game_name = rel.aggregate("max(game_name)").fetchone()[0] or str(game_id)
+    label = _INVALID_FILENAME_RE.sub("_", f"{game_name}-{int(game_id)}")
+    spec = CURATED_GAME_LAYOUTS.get(int(game_id))
+    suffix = "-看板列" if spec else ""
+    path = (Path(settings.project_root) / "data" / "analysis" / "by_game"
+            / f"pxb7-listings-{label}{suffix}.csv")
+    if spec:
+        headers, render = spec
+        rel = rel.select(*[duckdb.ColumnExpression(c) for c in _CURATED_COLUMNS])
+    else:
+        headers, render = tuple(rel.columns), None
+    rel = rel.order("TRY_CAST(listing_id AS BIGINT) DESC, listing_id DESC")
+    names = list(rel.columns)
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8-sig", newline="",
+                                         dir=path.parent, prefix=".sync-", suffix=".tmp",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            writer = csv.writer(stream)
+            writer.writerow(headers)
+            count = 0
+            while batch := rel.fetchmany(1000):
+                for row in batch:
+                    writer.writerow(render(dict(zip(names, row))) if render else row)
+                    count += 1
+        temporary.replace(path)
+        return {"ok": True, "game_id": int(game_id), "path": str(path), "rows": count}
+    except OSError as exc:
+        logging.getLogger(__name__).warning("游戏 %s CSV 同步失败：%s", game_id, exc)
+        return {"ok": False, "game_id": int(game_id), "path": str(path),
+                "error": f"{type(exc).__name__}: {exc}",
+                "message": "数据已入库，游戏表同步失败；请关闭占用的表格或检查目录权限，下一批采集会重试"}
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                logging.getLogger(__name__).warning("同步临时文件清理失败：%s", exc)
+
+
 def export_curated_csv_lines(result: Mapping[str, Any]) -> list[str]:
     """看板列导出结果的纯文本摘要（CLI 用）。"""
     return [
@@ -660,6 +714,14 @@ def format_report(result: Mapping[str, Any]) -> list[str]:
         lines.append(f"  {game['game_name']}（{game['game_id']}）：listing {game['listings']}，"
                      f"最新轮次 {game['latest_round']}，价格缺失 {game['price_missing']}，"
                      f"词表命中覆盖 {game['kw_covered']}，单轮 {game['single_round']}")
+    schemas = (result.get("game_schemas") or {}).get("schemas") or {}
+    if schemas:
+        lines.append("[analysis] 按游戏 schema（game_<id>.listings / .keyword_hits，视图实时同步）："
+                     + "、".join(f"{s}={n}行" for s, n in sorted(schemas.items())))
+    unregistered = (result.get("game_schemas") or {}).get("unregistered") or []
+    if unregistered:
+        lines.append(f"[analysis][缺口] 有数据但未登记按游戏 schema：{unregistered}"
+                     "（新游戏接入时在 db.ensure_game_schemas 登记同构语句）")
     if quality.get("price_bands"):
         lines.append("[analysis] 价格带：" + "、".join(
             f"{k}={v}" for k, v in quality["price_bands"].items()))

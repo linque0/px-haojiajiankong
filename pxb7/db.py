@@ -1182,6 +1182,84 @@ def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
     return len(rows)
 
 
+# --------------------------------------------------------------------------- #
+# 按游戏分类 schema（2026-10-05 用户指令）：每个有数据的游戏一个 game_<game_id> 命名空间。
+# 安全口径（门禁约束：execute 只接受内联固定 SQL、数据值参数绑定）：DDL 标识符无法参数
+# 绑定，因此每条语句都是**内联字面量**并按游戏展开；新游戏接入时随 config/tasks.yaml 与
+# 词表画像一并在本函数登记同构语句（与现有"接新游戏必改配置"同流程）。
+# --------------------------------------------------------------------------- #
+GAME_SCHEMA_VIEWS: tuple[str, ...] = ("listings", "keyword_hits")
+
+
+def ensure_game_schemas(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """按游戏种类分类分析数据：为有数据的游戏各建/刷新其 game_<game_id> schema（幂等）。
+
+    - schema 内含 GAME_SCHEMA_VIEWS 两个视图：listings（分析主表该游戏行）、
+      keyword_hits（词表命中长表该游戏行）；视图不复制数据，随主视图实时同步；
+    - 当前已无数据的游戏，其 schema 会被清理（DROP … CASCADE）；
+    - 有数据但未在本函数登记同构语句的游戏**不猜测、不建错名**，原样列在返回值的
+      ``unregistered`` 里提示接入。
+    """
+    games = {int(row[0]) for row in conn.execute(
+        "SELECT game_id FROM v_listing_analysis GROUP BY game_id").fetchall()}
+    made: dict[str, int] = {}
+
+    if 10026 in games:                                    # 原神
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "game_10026"')
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10026".listings AS'
+            " SELECT * FROM v_listing_analysis WHERE game_id = 10026")
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10026".keyword_hits AS'
+            " SELECT * FROM v_keyword_hits WHERE game_id = 10026")
+        made["game_10026"] = int(conn.execute(
+            'SELECT count(*) AS n FROM "game_10026".listings').fetchone()[0])
+    else:
+        conn.execute('DROP SCHEMA IF EXISTS "game_10026" CASCADE')
+
+    if 10032 in games:                                    # 火影忍者
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "game_10032"')
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10032".listings AS'
+            " SELECT * FROM v_listing_analysis WHERE game_id = 10032")
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10032".keyword_hits AS'
+            " SELECT * FROM v_keyword_hits WHERE game_id = 10032")
+        made["game_10032"] = int(conn.execute(
+            'SELECT count(*) AS n FROM "game_10032".listings').fetchone()[0])
+    else:
+        conn.execute('DROP SCHEMA IF EXISTS "game_10032" CASCADE')
+
+    if 10302 in games:                                    # 鸣潮
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "game_10302"')
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10302".listings AS'
+            " SELECT * FROM v_listing_analysis WHERE game_id = 10302")
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10302".keyword_hits AS'
+            " SELECT * FROM v_keyword_hits WHERE game_id = 10302")
+        made["game_10302"] = int(conn.execute(
+            'SELECT count(*) AS n FROM "game_10302".listings').fetchone()[0])
+    else:
+        conn.execute('DROP SCHEMA IF EXISTS "game_10302" CASCADE')
+
+    if 10371 in games:                                    # 三角洲行动
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "game_10371"')
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10371".listings AS'
+            " SELECT * FROM v_listing_analysis WHERE game_id = 10371")
+        conn.execute(
+            'CREATE OR REPLACE VIEW "game_10371".keyword_hits AS'
+            " SELECT * FROM v_keyword_hits WHERE game_id = 10371")
+        made["game_10371"] = int(conn.execute(
+            'SELECT count(*) AS n FROM "game_10371".listings').fetchone()[0])
+    else:
+        conn.execute('DROP SCHEMA IF EXISTS "game_10371" CASCADE')
+
+    unregistered = sorted(games - {10026, 10032, 10302, 10371})
+    return {"schemas": made, "unregistered": unregistered}
+
+
 def table_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, int]:
     """各表行数（status 子命令用）。"""
     return dict(conn.execute(
