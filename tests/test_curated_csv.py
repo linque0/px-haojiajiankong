@@ -105,7 +105,7 @@ def test_wuwa_cells_fallbacks_roster_first() -> None:
 # --------------------------------------------------------------------------- #
 # 导出集成
 # --------------------------------------------------------------------------- #
-def test_export_curated_csv_writes_bom_and_exact_rows(seeded) -> None:  # noqa: F811
+def test_export_curated_csv_writes_bom_and_exact_rows(seeded, tmp_path) -> None:  # noqa: F811
     # 鸣潮行补充完整特征（含 0 值资源、具名链、付费商品、发布时间）
     with db.connect(seeded.paths.db) as conn:
         _listing(conn, "W9", 10302, "鸣潮 满命长离 星声0 官服", "2026-10-04 09:00:00")
@@ -121,9 +121,11 @@ def test_export_curated_csv_writes_bom_and_exact_rows(seeded) -> None:  # noqa: 
                       "character_skins": ["桃夭灼灼"],
                   }), publish="2026-10-03 18:00:00")
 
-    result = A.export_curated_csv(seeded, game_id=10302)
+    # out_path 必须显式给 tmp：默认路径基于真实项目根，缺省会覆盖线上数据表
+    # （2026-10-04 事故：无参调用把 data/analysis/by_game 的 204 行真实表覆盖成 2 行夹具）
+    result = A.export_curated_csv(seeded, tmp_path / "wuwa.csv", game_id=10302)
     path = Path(result["path"])
-    assert "鸣潮-10302-看板列.csv" in path.name and "pxb7-listings-" in path.name
+    assert path == tmp_path / "wuwa.csv"
     assert result["rows"] == 2 and result["game_name"] == "鸣潮"
     assert path.read_bytes()[:3] == b"\xef\xbb\xbf"
 
