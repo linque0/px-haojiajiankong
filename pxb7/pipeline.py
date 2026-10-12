@@ -175,7 +175,9 @@ def build_listings(list_result: C.ListRunResult, keywords: Sequence[X.Keyword]) 
 def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
                listings: Sequence[ListingRow], collected_via: str,
                infer_delist: bool = True, now: _dt.datetime | None = None,
-               delist_skip_reason: str | None = None) -> LoadStats:
+               delist_skip_reason: str | None = None, commit: bool = True,
+               sync_csv: bool = True, preserve_same_round: bool = True,
+               compare_latest_prices: bool = False) -> LoadStats:
     """增量合并 + 幂等快照写入（同轮重跑先删后插）。"""
     now = now or _dt.datetime.now()
     stats = LoadStats()
@@ -186,7 +188,7 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
     ids = [row.listing_id for row in listings]
 
     # 页内加载更多会重送同一轮列表，保留已由详情回填的属性。
-    for row in listings:
+    for row in listings if preserve_same_round else ():
         previous = conn.execute(
             "SELECT level, yellow_cnt, five_star_chars, five_star_weapons,"
             " viewers_masked, favorites_cnt, extracted_features FROM fct_listing_snapshot"
@@ -225,6 +227,11 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
     # 1) 新 listing 判定（入库前查询）
     flags = db.fetch_listing_flags(conn, ids)
     stats.new_listings = sum(1 for i in ids if i not in flags)
+    latest_prices = {}
+    if compare_latest_prices:
+        latest_prices = dict(conn.execute(
+            "SELECT listing_id,price_yuan FROM fct_listing_snapshot WHERE list_contains(?,listing_id)"
+            " QUALIFY row_number() OVER(PARTITION BY listing_id ORDER BY snapshot_at DESC)=1", [ids]).fetchall())
 
     # 2) dim_listing 更新（first_seen/last_seen/is_active）
     db.upsert_dim_listings(conn, [{"listing_id": r.listing_id, "game_id": task.game_id,
@@ -232,8 +239,8 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
 
     # 3) 与上一轮快照 diff → 价格变化
     stats.prev_round = db.previous_round(conn, round_ts)
-    if stats.prev_round is not None:
-        prev_prices = db.fetch_snapshot_prices(conn, stats.prev_round, ids)
+    if stats.prev_round is not None or compare_latest_prices:
+        prev_prices = latest_prices if compare_latest_prices else db.fetch_snapshot_prices(conn, stats.prev_round, ids)
         changes = []
         for row in listings:
             price = row.card.fields.get("price_yuan")
@@ -241,7 +248,7 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
             if price is None or old is None:
                 continue
             if float(price) != float(old):
-                changes.append({"listing_id": row.listing_id, "ts": round_ts,
+                changes.append({"listing_id": row.listing_id, "ts": now if compare_latest_prices else round_ts,
                                 "old_price": float(old), "new_price": float(price)})
         stats.price_changes = db.write_price_changes(conn, changes)
 
@@ -256,7 +263,7 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
                                       round_minutes=settings.snapshot_round_minutes,
                                       # batch：只删本批 listing_id。整桶 DELETE 会在
                                       # 「同一轮次桶内跑第二个任务/第二个进程」时删掉对方已写入的行
-                                      scope="batch")
+                                      scope="batch", commit=commit)
     stats.snapshots_inserted = written["snapshot_rows"]
     stats.keyword_hits = written["keyword_rows"]
 
@@ -268,8 +275,9 @@ def load_round(conn, settings: Settings, task: Task, *, round_ts: _dt.datetime,
         stats.delist_inferred = True
     else:
         stats.delist_skip_reason = delist_skip_reason or "not-inferred"
-    from .analysis import sync_game_csv
-    stats.analysis_sync = sync_game_csv(settings, conn, game_id=task.game_id)
+    if sync_csv:
+        from .analysis import sync_game_csv
+        stats.analysis_sync = sync_game_csv(settings, conn, game_id=task.game_id)
     return stats
 
 

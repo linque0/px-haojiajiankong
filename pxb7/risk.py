@@ -31,6 +31,8 @@ from dataclasses import asdict, dataclass, field as _dc_field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from bs4 import BeautifulSoup
+
 from .config import Settings
 
 STATE_SCHEMA_VERSION = "v2"   # v2：任务级档位（tasks 映射）；v1 旧文件读取时自动迁移
@@ -609,10 +611,26 @@ def detect_dom_signals(html: str) -> tuple[str, ...]:
     """
     if not html:
         return ()
+    # 完成验证后SDK的CSS和隐藏组件仍留在DOM。对整份HTML搜索
+    # aliyunCaptcha-show会把样式规则、脚本字符串及display:none祖先误判为激活。
+    soup = BeautifulSoup(html, "html.parser")
+    for node in list(soup.select("script, style, noscript, template")):
+        node.decompose()
+    hidden_style = re.compile(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", re.I)
+    for node in list(soup.find_all(attrs={"style": hidden_style})):
+        if node.parent is not None:
+            node.decompose()
+    for node in list(soup.find_all(attrs={"hidden": True})):
+        if node.parent is not None:
+            node.decompose()
     hits: list[str] = []
-    for name, pattern in WAF_DOM_PATTERNS:
-        if re.search(pattern, html, re.IGNORECASE):
-            hits.append(f"{SIGNAL_CAPTCHA}:{name}")
+    for name, selector in [("waf-slider-active", "#waf_nc_block"),
+                           ("aliyun-captcha-shown", ".aliyunCaptcha-show"),
+                           ("waf-nocaptcha-shown", "#nocaptcha")]:
+        for node in soup.select(selector):
+            if selector.startswith(".") or re.search(r"display\s*:\s*block", node.get("style", ""), re.I):
+                hits.append(f"{SIGNAL_CAPTCHA}:{name}")
+                break
     return tuple(hits)
 
 

@@ -1,0 +1,358 @@
+{
+  "version": "3.7-20261008-v2",
+  "game_version": "3.7",
+  "checked_at": "2026-10-08",
+  "description": "截至3.7的51张地图目录；全部地图已有满探索参考星声总量（社区统计图与用户核对，均为近似值，未证明覆盖后续版本对旧图的追加奖励）。仅保留星声；抽卡券不再统计。未核实数字保留null，不用全版本收入或限时活动收入填造。",
+  "sources": {
+    "collector_stats": {
+      "url": "https://www.233leyuan.com/post-detail/2070083831279890432",
+      "author": "B站各版本地图资源全收集统计图（清水代肝系列，233乐园转载）",
+      "title": "1.0-3.4版本地图资源全收集攻略：逐地图满探索100%星声统计图",
+      "scope": "满探索口径逐地图星声；隐海试验场1150、梦枢天罗2902为用户核对值；整理与交叉核对见 docs/22-鸣潮各地图星声数量统计.md"
+    },
+    "regional_series": {
+      "url": "https://www.bilibili.com/video/BV1D7EwzWE1n/",
+      "author": "原鸣の代肝花菜CoC",
+      "title": "各区域星声汇总（已断更）",
+      "scope": "v1旧口径：分区域总量，七丘2040+按约2040不另加三王峰320；v2已改用 collector_stats 满探索值，本项仅留档"
+    },
+    "version_3_7": {
+      "url": "https://mc.kurogames.com/main/news/detail/5569",
+      "scope": "3.7版本地图名称与区域划分；官方未提供逐地图奖励总量"
+    }
+  },
+  "aliases": {
+    "中区台地": "中曲台地",
+    "荒石高低": "荒石高地",
+    "今洲城": "今州城",
+    "泰缇斯之低": "泰缇斯之底"
+  },
+  "maps": {
+    "云陵谷": {
+      "resources": {"astrite": 530},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "今州城": {
+      "resources": {"astrite": 540},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "中曲台地": {
+      "resources": {"astrite": 1430},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "荒石高地": {
+      "resources": {"astrite": 1000},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "归墟港市": {
+      "resources": {"astrite": 1380},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "无光之森": {
+      "resources": {"astrite": 1100},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "无明湾": {
+      "resources": {"astrite": 590},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "北落野": {
+      "resources": {"astrite": 500},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "怨鸟泽": {
+      "resources": {"astrite": 1570},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "虎口山脉": {
+      "resources": {"astrite": 550},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "乘霄山": {
+      "resources": {"astrite": 3000},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "瑝珑"
+    },
+    "玄方城": {
+      "resources": {"astrite": 250},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "梦州"
+    },
+    "方擎西峰": {
+      "resources": {"astrite": 480},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "梦州"
+    },
+    "落渊南丘": {
+      "resources": {"astrite": 470},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "梦州"
+    },
+    "玄幽东岳": {
+      "resources": {"astrite": 660},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "梦州"
+    },
+    "梦枢天罗": {
+      "resources": {"astrite": 2902},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "梦州"
+    },
+    "黑海岸群岛": {
+      "resources": {"astrite": 810},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "黑海岸"
+    },
+    "泰缇斯之底": {
+      "resources": {"astrite": 1250},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "黑海岸"
+    },
+    "拉古那城": {
+      "resources": {"astrite": 120},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "埃弗拉德金库": {
+      "resources": {"astrite": 700},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "悲叹墓岛": {
+      "resources": {"astrite": 610},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "赞悼圣迹": {
+      "resources": {"astrite": 450},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "拂风水畔": {
+      "resources": {"astrite": 650},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "氤柔水境": {
+      "resources": {"astrite": 550},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "槲生半岛": {
+      "resources": {"astrite": 1000},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "狄萨莱海脊": {
+      "resources": {"astrite": 1300},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "下层金库": {
+      "resources": {"astrite": 650},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "黎乔利群岛": {
+      "resources": {"astrite": 550},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "阿维纽林": {
+      "resources": {"astrite": 890},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "贝奥海域": {
+      "resources": {"astrite": 510},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "七丘": {
+      "resources": {"astrite": 2800},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "隐海试验场": {
+      "resources": {"astrite": 1150},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "桑古伊斯狩原": {
+      "resources": {"astrite": 2200},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉古那"
+    },
+    "联运椎骨": {
+      "resources": {"astrite": 130},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "牙列石壑": {
+      "resources": {"astrite": 540},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "陷足流川": {
+      "resources": {"astrite": 520},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "复生丘原": {
+      "resources": {"astrite": 450},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "蚀刻平原": {
+      "resources": {"astrite": 650},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "星炬学院": {
+      "resources": {"astrite": 200},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "隐喙深腹": {
+      "resources": {"astrite": 80},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "巨目远野": {
+      "resources": {"astrite": 285},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "浮光林": {
+      "resources": {"astrite": 415},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "冰原运输港": {
+      "resources": {"astrite": 250},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "加拉尔冠阶": {
+      "resources": {"astrite": 300},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "盲望之塌": {
+      "resources": {"astrite": 610},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "元林遗址": {
+      "resources": {"astrite": 540},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "覆海原": {
+      "resources": {"astrite": 310},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "落日堤屿": {
+      "resources": {"astrite": 720},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "封存地": {
+      "resources": {"astrite": 360},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "寂静断崖": {
+      "resources": {"astrite": 300},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "恒黯之原": {
+      "resources": {"astrite": 410},
+      "approximate": true,
+      "source": "collector_stats",
+      "parent": "拉海洛"
+    },
+    "瑝珑": {
+      "resources": {},
+      "approximate": true
+    },
+    "黑海岸": {
+      "resources": {},
+      "approximate": true
+    },
+    "拉古那": {
+      "resources": {},
+      "approximate": true
+    },
+    "拉海洛": {
+      "resources": {},
+      "approximate": true
+    },
+    "梦州": {
+      "resources": {},
+      "approximate": true
+    }
+  }
+}

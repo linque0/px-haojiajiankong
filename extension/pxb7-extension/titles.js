@@ -50,6 +50,7 @@
     async function read(item, refresh = false) {
       const current = () => item.card.isConnected !== false && item.card.getAttribute("productid") === item.id;
       if (!alive()) { stats.stop = "route-change"; return false; }
+      if (options.waitUntilReady && !await options.waitUntilReady()) { stats.stop = "route-change"; return false; }
       if (!current()) { stats.stop = "list-change"; return false; }
       if (options.progress) options.progress(stats.captured, stats.cards, refresh, processed);
       const result = await getTitle(item.id, refresh);

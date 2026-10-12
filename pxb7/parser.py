@@ -580,6 +580,11 @@ def parse_card(card: Tag | str, *, parser_version: str = PARSER_VERSION,
         m = re.search(r"(\d{3,})", extra["listing_id"])
         extra["listing_id"] = m.group(1) if m else None
 
+    from .weapons import explicit_empty
+    if fields.get("five_star_weapons") is None and explicit_empty(card_text):
+        fields["five_star_weapons"] = 0
+        hits["five_star_weapons"] = "explicit-empty"
+
     missing = [f for f in CONTRACT_FIELDS if fields.get(f) is None]
     missing_required = [f for f in REQUIRED_FIELDS if fields.get(f) is None]
     other_ok = sum(1 for f in CONTRACT_FIELDS
@@ -713,13 +718,22 @@ def describe_selectors() -> dict[str, Any]:
     }
 
 
-def parse_detail_attributes(html: str) -> tuple[str | None, dict[str, Any]]:
-    """只解析当前商品，剔除推荐卡片；逐字 span 标题拼回完整文字。"""
+def _detail_root(html: str):
     soup = BeautifulSoup(sanitize_dom_text(html), "html.parser")
     prune_hidden(soup)
     for node in soup.select("script, style, noscript, .smallCard, .middleCard, [productid]"):
         node.decompose()
-    root = soup.select_one(".product-detail") or soup
+    return soup.select_one(".product-detail") or soup
+
+
+def detail_product_text(html: str) -> str:
+    """当前商品可见文字，不含推荐位、隐藏节点和脚本。"""
+    return _detail_root(html).get_text("", strip=True)
+
+
+def parse_detail_attributes(html: str) -> tuple[str | None, dict[str, Any]]:
+    """只解析当前商品，剔除推荐卡片；逐字 span 标题拼回完整文字。"""
+    root = _detail_root(html)
     title_node = root.select_one("[data-product-title], .product-title, .line-clamp-5, h1")
     title = title_node.get_text("", strip=True) if title_node else None
     text = root.get_text(" ", strip=True)
@@ -737,4 +751,7 @@ def parse_detail_attributes(html: str) -> tuple[str | None, dict[str, Any]]:
             hit = _extract(root, name, strategies, text)
         if hit is not None:
             values[name] = hit.value
+    from .weapons import explicit_empty
+    if values.get("five_star_weapons") is None and explicit_empty((title or "") + " " + text):
+        values["five_star_weapons"] = 0
     return title, values

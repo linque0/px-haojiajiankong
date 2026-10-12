@@ -26,9 +26,9 @@ SWEEP_JS = EXT / "sweep.js"
 def test_sweep_js_exists_and_is_wired_into_manifest() -> None:
     assert SWEEP_JS.is_file(), "缺少 sweep.js"
     manifest = json.loads((EXT / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.5.3"
+    assert manifest["version"] == "0.5.13"
     js = manifest["content_scripts"][0]["js"]
-    assert js == ["sweep.js", "titles.js", "content.js"], "辅助脚本必须先于 content.js 注入"
+    assert js == ["sweep.js", "titles.js", "verification.js", "content.js"], "辅助脚本必须先于 content.js 注入"
     text = SWEEP_JS.read_text(encoding="utf-8")
     for marker in ("countCards", "findMoreControl", "nextAction", "scrollForMore",
                    "clampTarget", "maxCards: 200", "intervalMs: 2000"):
@@ -39,11 +39,11 @@ def test_sweep_js_exists_and_is_wired_into_manifest() -> None:
 def test_content_script_uses_sweep_and_keeps_single_page_default() -> None:
     content = (EXT / "content.js").read_text(encoding="utf-8")
     for marker in ("PXB7_SWEEP", "expandCards", "sendPage", "cards_target",
-                   "countCards", "clampTarget", "stepInterval"):
+                   "selectCards", "clampTarget", "stepInterval"):
         assert marker in content, f"内容脚本缺少要素：{marker}"
     assert "cards_target: 16" in content, "默认一次一页（16 张），不改变既有行为"
     assert "sweep: stats" in content, "加载更多后的第二次入库须带 sweep 统计（透明记录）"
-    assert "SWEEP.countCards(document)" in content, "卡片计数统一走 sweep.js"
+    assert 'path:"/collection/check"' in content, "采集前查询本地账号去重状态"
 
 
 def test_userscript_has_same_sweep_contract() -> None:
@@ -51,7 +51,7 @@ def test_userscript_has_same_sweep_contract() -> None:
     for marker in ("clampTarget", "expandCards", "findMoreControl", "cards_target",
                    "pxb7-p-cards", "maxRounds: 12", "sweep: stats"):
         assert marker in text, f"油猴脚本缺少要素：{marker}"
-    assert "@version      0.6.0" in text and 'SCRIPT_VERSION = "0.6.0"' in text
+    assert "@version      0.6.1" in text and 'SCRIPT_VERSION = "0.6.1"' in text
     # 双通道版本上报分开（看板按通道分别显示更新状态，不得混写）
     assert "channel=userscript" in text, "油猴脚本须以 userscript 通道上报版本"
     background = (EXT / "background.js").read_text(encoding="utf-8")

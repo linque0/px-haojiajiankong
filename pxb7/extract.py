@@ -336,6 +336,10 @@ def wuwa_paid_item_features(text: str) -> dict[str, Any]:
         names = [name.strip() for name in re.split(r"[,，、]", section) if name.strip()]
         if names:
             features[key] = list(dict.fromkeys([*features.get(key, []), *names]))
+        else:
+            # 段落存在但为空：写空列表作为「已核为空」标记（2026-10-06 用户指令），
+            # 保留原始页面的空段落信息；付费商品是否采到不再触发查缺（docs/20）。
+            features.setdefault(key, [])
     return features
 
 

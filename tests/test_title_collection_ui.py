@@ -25,11 +25,14 @@ const sandbox={document:doc,console,Date,Promise,JSON,Number,String,process,
  sessionStorage:{getItem(k){return storage.get(k);},setItem(k,v){storage.set(k,v);}},
  setTimeout(fn){timers.push(fn);return timers.length;},clearTimeout(){},setInterval(){},addEventListener(){},
  PXB7_TITLES:{async collect(){return {cards:2,captured:1,failed:1,requested:1,stop:process.argv[2],titles:{'123456':full}};}},
- PXB7_SWEEP:{clampTarget(){return 32;},countCards(){return 2;},findMoreControl(){return null;},nextAction(){sweeps++;return 'done';},DEFAULTS:{}},
+ PXB7_SWEEP:{clampTarget(){return 32;},countCards(){return 2;},findMoreControl(){return null;},nextAction(){sweeps++;return 'done';},DEFAULTS:{},
+   selectCards(){return ['123456','123457'].map(id=>({id,url:'https://www.pxb7.com/product/'+id+'/1'}));},capture(doc,refs,titles){return '<a>'+(titles?.['123456']||'')+'</a>'; }},
  chrome:{runtime:{getManifest(){return {version:'0.4.4'};},onMessage:{addListener(fn){handlers.push(fn);}},sendMessage(msg,cb){
   if(msg.type==='config')return cb({ok:true,data:{ok:true,config:{auto_ingest:true,spa_settle_ms:1,cards_target:32}}});
   if(msg.type!=="ingest")return cb({ok:true,worker:false,taskId:"test-task"});
-  sent.push(msg);cb({ok:true,data:{ok:true,cards_seen:2,cards_parsed:2,new_listings:0,parse_success_rate:1}});
+  if(msg.path==='/collection/check')return cb({ok:true,data:{ok:true,items:['123456','123457'].map(id=>({id,kind:'new'}))}});
+  sent.push(msg);cb({ok:true,data:{ok:true,cards_seen:2,cards_parsed:2,new_listings:2,parse_success_rate:1,
+    accepted_ids:['123456','123457'],skipped_ids:[],updated_ids:[],items:['123456','123457'].map(id=>({id,kind:'new',missing:[]}))}});
  }}}
 };sandbox.window=sandbox;
 vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),sandbox);

@@ -104,8 +104,42 @@
   // ---------- 目标张数：站点一页只渲染 16 张，需要更多就在页内把卡片加载出来 ----------
   const SWEEP = (typeof window !== "undefined" && window.PXB7_SWEEP) || null;
   const TITLES = (typeof window !== "undefined" && window.PXB7_TITLES) || null;
+  const VERIFY = (typeof window !== "undefined" && window.PXB7_VERIFICATION) || null;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let taskId = null, cancelled = false, workerPage = false;
+  let manualVerificationConfirmed = false;
+  async function waitVerification(pageUrl, job = null, alreadyPaused = false, requireObserved = false) {
+    if (!VERIFY) return true;
+    const identity = () => ({taskId:job?.taskId || taskId, nonce:job?.nonce, pageUrl});
+    if (alreadyPaused) show("等待网站验证恢复；原任务进度已保留", false);
+    const result = await VERIFY.waitForClear(document, window, {
+      alreadyPaused, requireObserved,
+      alive:() => !cancelled && location.href === pageUrl,
+      confirmed:() => manualVerificationConfirmed,
+      onBlocked:async () => {
+        manualVerificationConfirmed = false;
+        show("等待网站滑块验证；完成后自动继续，进度已保留", false);
+        return (await bg({type:"verification-pause", ...identity()})).ok;
+      },
+      onClear:async () => {
+        const reply = await bg({type:"verification-resume", ...identity()});
+        if (!reply.ok) return false;
+        if (job) job.nonce = reply.nonce;
+        manualVerificationConfirmed = false;
+        show("验证已恢复，继续原采集任务", true);
+        return true;
+      },
+    });
+    return result.ok;
+  }
+  async function waitRejectedVerification(pageUrl, job = null) {
+    const reply = await bg({type:"verification-pause", taskId:job?.taskId || taskId, nonce:job?.nonce, pageUrl});
+    if (!reply.ok) return false;
+    manualVerificationConfirmed = false;
+    show("验证页已拒收；请完成验证，或在弹窗确认后继续", false);
+    // 网关拒收但页面没有可见挑战时，不靠定时器重复提交；等待挑战出现/消失或用户明确确认。
+    return waitVerification(pageUrl, job, true, true);
+  }
   function progress(phase, extra = {}) {
     if (!taskId) return;
     bg({type:"collection-progress", taskId, phase, ...extra});
@@ -122,20 +156,45 @@
   /** 滚动/点「加载更多」把卡片加载出来，直到达到目标张数或连续两轮没有新增 */
   async function expandCards(target, pageUrl) {
     const stats = { target, initial: 0, final: 0, rounds: 0, stalled: 0, stop: "no-sweep" };
-    if (!SWEEP) return stats;
-    let cards = SWEEP.countCards(document);
-    stats.initial = cards;
-    stats.final = cards;
+    if (!SWEEP?.selectCards) throw new Error("采集组件不可用，请应用扩展更新后刷新页面");
+    const candidates = new Map();
+    let decisions = new Map(), added = 0;
+    async function scan() {
+      const refs = SWEEP.selectCards(document, Infinity, pageUrl);
+      added = 0;
+      for (const item of refs) {
+        if (!candidates.has(item.id)) added++;
+        candidates.set(item.id, item);
+      }
+      const res = await bg({type:"ingest", path:"/collection/check", payload:{url:pageUrl,
+        html:SWEEP.capture(document, Array.from(candidates.values()))}});
+      if (res.data?.error === "risk-page") {
+        if (!await waitRejectedVerification(pageUrl)) throw new Error("采集取消或页面已变化");
+        return scan();
+      }
+      if (!res.ok || !res.data?.ok || !Array.isArray(res.data.items)) {
+        throw new Error(res.data?.error || res.err || "账号去重查询失败，采集已停止");
+      }
+      decisions = new Map(res.data.items.map(item => [item.id, item]));
+      for (const item of candidates.values()) {
+        if (!decisions.has(item.id)) throw new Error("商品解析不完整，无法确认去重状态，请刷新列表");
+      }
+      stats.final = candidates.size;
+      return Array.from(decisions.values()).filter(item => item.kind === "new").length;
+    }
+    let cards = await scan();
+    stats.initial = candidates.size;
     while (true) {
       if (cancelled || location.href !== pageUrl) { stats.stop = "done-route-change"; break; }
+      if (!await waitVerification(pageUrl)) { stats.stop = "done-route-change"; break; }
       const action = SWEEP.nextAction({
         cards, target, rounds: stats.rounds, maxRounds: SWEEP.DEFAULTS.maxRounds,
         stalled: stats.stalled, maxStalled: SWEEP.DEFAULTS.maxStalled,
         hasMoreControl: !!SWEEP.findMoreControl(document),
       });
       if (action.indexOf("done") === 0) { stats.stop = action; break; }
-      show(`加载更多中 ${cards}/${target} 张…`, true);
-      progress(`加载卡片 ${Math.min(cards, target)}/${target}`);
+      show(`加载新账号 ${cards}/${target}；已检查 ${candidates.size} 个…`, true);
+      progress(`加载新账号 ${Math.min(cards, target)}/${target}；已检查 ${candidates.size} 个`);
       const control = action === "click" ? SWEEP.findMoreControl(document) : null;
       if (control) {
         try { control.click(); } catch (e) { SWEEP.scrollForMore(window, document); }
@@ -143,23 +202,28 @@
         SWEEP.scrollForMore(window, document);
       }
       await sleep(stepInterval());
-      const next = SWEEP.countCards(document);
+      if (!await waitVerification(pageUrl)) { stats.stop = "done-route-change"; break; }
+      const next = await scan();
       stats.rounds += 1;
-      if (next <= cards) stats.stalled += 1; else stats.stalled = 0;
+      if (!added) stats.stalled += 1; else stats.stalled = 0;
       cards = next;
-      stats.final = cards;
     }
-    return stats;
+    const fresh = Array.from(candidates.values()).filter(item => decisions.get(item.id)?.kind === "new").slice(0,target);
+    const other = Array.from(candidates.values()).filter(item => ["changed", "retry"].includes(decisions.get(item.id)?.kind));
+    return {stats, selected:[...other, ...fresh], decisions};
   }
 
   /** 把当前页 DOM 发给网关（extra 并入 payload，如 sweep 统计）；返回 {ok,data,error} */
   async function sendPage(path, extra, options = {}) {
+    const currentUrl = location.href;
+    if (!await waitVerification(currentUrl)) return {ok:false, error:"采集取消或页面已变化"};
     let titleStats = null;
     if (path === "/ingest/cards" && TITLES && !options.skipTitles) {
       const pageUrl = location.href;
       show("读取账号完整标题（无需悬浮）…", true);
       titleStats = await TITLES.collect(document, window, {alive:() => !cancelled && location.href === pageUrl,
-        ids:options.selected?.map(item => item.id),
+        waitUntilReady:() => waitVerification(pageUrl),
+        ids:options.titleIds || options.selected?.map(item => item.id),
         intervalMs:CONFIG.title_interval_ms,
         progress:(captured, cards, retry, processed) => {
           const phase = `${retry ? "补采缺失全文" : "读取账号全文"} ${captured}/${cards}`;
@@ -171,8 +235,10 @@
         show("列表已变化，请重新采集本页", false);
         return {ok:false, error:"list-change"};
       }
+      if (titleStats.stop === "verification") return {ok:false, error:"网站要求验证", errorCode:"risk-page"};
     }
     if (cancelled) return {ok:false, error:"已取消采集"};
+    if (!await waitVerification(currentUrl)) return {ok:false, error:"采集取消或页面已变化"};
     show(isDetail() ? "发送详情页…" : "发送本页卡片…", true);
     let html = document.documentElement.outerHTML;
     if (options.selected && SWEEP) {
@@ -194,6 +260,7 @@
       html,
       page_no: 1,
       listing_id: isDetail() ? (location.pathname.match(/\/product\/(\d+)/) || [])[1] : undefined,
+      ...(options.selected ? {selected_ids:options.selected.map(item => item.id)} : {}),
     };
     if (extra) Object.assign(payload, extra);
     if (titleStats) {
@@ -210,13 +277,22 @@
         || d.error || res.err || "未知错误";
       show("失败：" + reason, false);
       log("ingest 失败：", res);
-      return { ok: false, error: reason };
+      return { ok: false, error: reason, errorCode:d.error };
     }
     if (titleStats) {
       const {titles, ...stats} = titleStats;
       titleStats = stats; // 调用方/弹窗只需完整率，公开文案已随 raw 保存。
     }
     return { ok: true, data: res.data, titleStats };
+  }
+  async function sendVerifiedPage(path, extra, options = {}) {
+    const pageUrl = location.href;
+    while (!cancelled && location.href === pageUrl) {
+      const result = await sendPage(path, extra, options);
+      if (result.errorCode !== "risk-page") return result;
+      if (!await waitRejectedVerification(pageUrl)) break;
+    }
+    return {ok:false, error:"采集取消或页面已变化"};
   }
 
   function titleStatus(stats) {
@@ -229,25 +305,40 @@
     return `，全文 ${stats.captured}/${stats.cards}` + (missing ? `，${missing} 张待补齐${reason ? "（" + reason + "）" : ""}` : "");
   }
 
-  let collecting = false;
-  async function ingest(force) {
+  let collecting = false, collectionRun = null;
+  async function ingest(force, resumeTask = null) {
+    // 后台取消已落盘时，页面可能仍在结束当前读取。等待旧操作退出再启动，
+    // 不提前清锁/重置 cancelled，避免旧操作恢复后污染新任务。
+    if (collecting && cancelled) await collectionRun;
     if (collecting) return {ok:false, error:"本页已有采集任务进行中"};
     collecting = true; cancelled = false;
-    try {
-      if (force) await fetchConfig(); // 保存设置后立即点采集，使用新方式/张数
-      return await ingestCurrent(force);
-    } catch (e) {
-      progress("采集失败：" + String(e.message || e), {status:"error"});
-      return {ok:false, error:String(e.message || e)};
-    } finally { collecting = false; taskId = null; }
+    collectionRun = (async () => {
+      try {
+        if (force) await fetchConfig(); // 保存设置后立即点采集，使用新方式/张数
+        if (cancelled) return {ok:false, error:"已取消采集"};
+        return await ingestCurrent(force, resumeTask);
+      } catch (e) {
+        progress("采集失败：" + String(e.message || e), {status:cancelled ? "cancelled" : "error"});
+        return {ok:false, error:String(e.message || e)};
+      } finally { collecting = false; taskId = null; }
+    })();
+    return collectionRun;
   }
 
   const normalize = text => String(text || "").replace(/[^\p{L}\p{N}]/gu, "");
-  async function waitDetailTitle(pageUrl, prefix = "") {
-    let previous = "";
+  // 下架页特征（2026-10-06 用户指令）：商品无法补录时跳过并标记失败，不耗满超时、
+  // 不计入连续失败。只在标题迟迟未就绪时观察，且要求标记连续稳定，避免误判加载中的正常页。
+  const DELIST_TEXT = /商品已?下架|商品不存在|商品已删除|商品已失效|已下架或已售出|页面不存在或已删除/;
+  function detectDelisted() {
+    if (/下架|已售出|不存在|已删除|已失效/.test(document.title || "")) return true;
+    const zone = document.querySelector(".product-detail") || document.body;
+    return DELIST_TEXT.test((zone?.textContent || "").slice(0, 6000));
+  }
+  async function waitDetailTitle(pageUrl, prefix = "", job = null) {
+    let previous = "", delistStable = 0;
     for (let attempt = 0; attempt < 200; attempt++) {
       if (cancelled || location.href !== pageUrl) return null;
-      if (/验证码|安全验证|访问受限/.test(document.title || "")) return {error:"verification"};
+      if (!await waitVerification(pageUrl, job)) return null;
       let node = document.querySelector(".product-detail [data-product-title], .product-detail .product-title, .product-detail .line-clamp-5, .product-detail h1");
       // 用户已点「更多」时 line-clamp 类会消失；仍按列表短标题找到当前商品主标题。
       if (!node && prefix && document.querySelectorAll) {
@@ -262,6 +353,11 @@
       const truncated = prefix.length >= 159 && full.length <= key.length + Math.max(0, index)
         && !/详情看图|官方截图/.test(text);
       if (text.length >= 6 && text === previous && matches && !truncated) return {node, text};
+      // 标题约 3 秒（30 次×100ms）仍未就绪才开始观察下架标记，连续 2 次稳定才判定。
+      if (attempt >= 30) {
+        delistStable = detectDelisted() ? delistStable + 1 : 0;
+        if (delistStable >= 2) return {delisted: true};
+      } else delistStable = 0;
       previous = text;
       await sleep(100); // 只观察 DOM 就绪；没有逐商品固定等待
     }
@@ -270,30 +366,38 @@
 
   async function runWorker(job) {
     cancelled = false;
+    taskId = job.taskId;
     const pageUrl = location.href;
-    const title = await waitDetailTitle(pageUrl, job.prefix);
-    let payload, error = title?.error;
-    if (!title) error = "detail-not-ready";
-    if (pageUrl !== job.url) error = "detail-id-mismatch";
-    if (!error) {
-      const clone = document.documentElement.cloneNode(true);
-      // 标记上传副本中的主标题，兼容展开后的 DOM；不修改站点页面。
-      const candidates = Array.from(clone.querySelectorAll(".product-detail div, .product-detail p, .product-detail h1"));
-      const node = candidates.find(el => (el.textContent || "").trim() === title.text);
-      if (!node) error = "detail-title-missing";
-      else {
-        node.setAttribute("data-product-title", "true");
-        payload = {url:pageUrl, html:clone.outerHTML, listing_id:job.id};
+    if (!await waitVerification(pageUrl, job, job.waiting_verification)) return;
+    while (!cancelled && location.href === pageUrl) {
+      const title = await waitDetailTitle(pageUrl, job.prefix, job);
+      let payload, error = title?.error;
+      if (title?.delisted) error = "delisted";
+      else if (!title) error = "detail-not-ready";
+      if (pageUrl !== job.url) error = "detail-id-mismatch";
+      if (!error) {
+        if (!await waitVerification(pageUrl, job)) return;
+        const clone = document.documentElement.cloneNode(true);
+        // 标记上传副本中的主标题，兼容展开后的 DOM；不修改站点页面。
+        const candidates = Array.from(clone.querySelectorAll(".product-detail div, .product-detail p, .product-detail h1"));
+        const node = candidates.find(el => (el.textContent || "").trim() === title.text);
+        if (!node) error = "detail-title-missing";
+        else {
+          node.setAttribute("data-product-title", "true");
+          payload = {url:pageUrl, html:clone.outerHTML, listing_id:job.id};
+        }
       }
+      show(error ? "详情未采集：" + error : "详情已就绪，正在入库…", !error);
+      const reply = await bg({type:"detail-result", taskId:job.taskId, nonce:job.nonce, payload, error});
+      if (!reply.paused) return;
+      if (!await waitVerification(pageUrl, job, true, true)) return;
     }
-    show(error ? "详情未采集：" + error : "详情已就绪，正在入库…", !error);
-    await bg({type:"detail-result", taskId:job.taskId, nonce:job.nonce, payload, error});
   }
 
-  async function ingestCurrent(force) {
+  async function ingestCurrent(force, resumeTask = null) {
     if (!isDetail() && !isList()) return {ok:true, skipped:"route"};
     const pageUrl = location.href, detailPage = isDetail();
-    if (!force && !CONFIG.auto_ingest) {
+    if (!resumeTask && !force && !CONFIG.auto_ingest) {
       show("自动采集已关闭（扩展弹窗可开启）", true);
       return {ok:true, skipped:"auto-off"};
     }
@@ -301,13 +405,13 @@
       show("该游戏不在采集目标（扩展弹窗可勾选）", true);
       return {ok:true, skipped:"target"};
     }
-    if (!force && shouldSkipAuto()) {
+    if (!resumeTask && !force && shouldSkipAuto()) {
       show(`本页 ${CONFIG.reingest_interval_min} 分钟内已采集`, true);
       return {ok:true, skipped:"dedupe"};
     }
-    const target = detailPage ? 1 : targetCards();
-    const mode = detailPage ? "detail" : CONFIG.collection_mode;
-    const started = await bg({type:"collection-begin", mode, total:target});
+    const target = resumeTask?.requested || (detailPage ? 1 : targetCards());
+    const mode = resumeTask?.mode || (detailPage ? "detail" : CONFIG.collection_mode);
+    const started = resumeTask ? {ok:true, taskId:resumeTask.id} : await bg({type:"collection-begin", mode, total:target, pageUrl});
     if (!started.ok) { show(started.err || "已有采集任务", false); return started; }
     taskId = started.taskId;
     function fail(error) {
@@ -315,36 +419,72 @@
       show(error, false);
       return {ok:false, error};
     }
+    if (!await waitVerification(pageUrl, null, !!resumeTask)) return fail("采集取消或页面已变化");
     if (detailPage) {
       const ready = await waitDetailTitle(pageUrl);
       if (!ready || ready.error) return fail(ready?.error || "商品详情尚未就绪，请加载完成后重采");
-      const result = await sendPage("/ingest/detail", null);
+      const result = await sendVerifiedPage("/ingest/detail", null);
       if (!result.ok) return fail(result.error);
       const weapons = result.data.attributes?.five_star_weapons;
       const incomplete = /五星角色|五星武器|光锥|音擎/.test(ready.text)
-        && (weapons == null || (weapons > 0 && !result.data.weapon_details_complete));
+        && (result.data.weapon_information
+          ? !result.data.weapon_details_complete
+          : (weapons == null || (weapons > 0 && !result.data.weapon_details_complete)));
       if (!incomplete) markIngested();
-      const phase = incomplete ? "详情已入库，武器信息待补齐" : "详情已入库";
+      const weaponLabel = result.data.weapon_information?.state === "unreported" ? "，页面未提供武器信息"
+        : result.data.weapon_information?.state === "none" ? "，已确认无五星武器" : "";
+      const phase = incomplete ? "详情已入库，武器信息未采到或解析失败" : "详情已入库" + weaponLabel;
       progress(phase, {status:incomplete ? "partial" : "done", total:1, processed:1, succeeded:1, incomplete:incomplete ? 1 : 0});
       show(phase, !incomplete);
       return {ok:true, result:result.data};
     }
     // 先加载，再选前 N 张，一次提交；不会反复整页请求全文或超出设置张数。
-    const stats = await expandCards(target, pageUrl);
+    let expanded;
+    try { expanded = await expandCards(target, pageUrl); }
+    catch (error) { return fail(error.message || "去重查询失败"); }
+    const {stats, selected, decisions} = expanded;
     if (cancelled || location.href !== pageUrl) return fail("采集取消或列表已变化");
-    const selected = SWEEP?.selectCards ? SWEEP.selectCards(document, target, pageUrl) : null;
-    if (selected && !selected.length) return fail("未找到有效商品卡片，请等待列表加载后重采");
-    const total = selected ? selected.length : Math.min(target, SWEEP ? SWEEP.countCards(document) : target);
+    const skipped = Array.from(decisions.values()).filter(item => item.kind === "skip").length;
+    const manual = Array.from(decisions.values()).filter(item => item.kind === "manual").length;
+    const freshCount = selected.filter(item => decisions.get(item.id)?.kind === "new").length;
+    if (!selected.length) {
+      const empty = await sendVerifiedPage("/ingest/cards", {sweep:stats,dedupe_counts:{skip:skipped,manual}}, {selected:[],skipTitles:true});
+      if (!empty.ok) return fail(empty.error);
+      const phase = `新增 0/${target}；重复跳过 ${skipped}，待查缺补录 ${manual}；${stats.stop}`;
+      progress(phase, {status:"partial", total:0, processed:0, duplicates:skipped, manual_pending:manual, new_succeeded:0});
+      show(phase, true);
+      return {ok:true, skipped:"no-new-accounts", sweep:stats};
+    }
+    const total = selected.length;
     progress(mode === "detail" ? "保存价格和商品清单" : "开始读取列表全文", {total});
-    const first = await sendPage("/ingest/cards", {sweep: stats}, {selected, skipTitles:mode === "detail"});
+    const first = await sendVerifiedPage("/ingest/cards", {sweep: stats,dedupe_counts:{skip:skipped,manual}}, {selected, skipTitles:mode === "detail",
+      titleIds:selected.filter(item => decisions.get(item.id)?.kind !== "retry").map(item => item.id)});
     if (!first.ok) return fail(first.error);
     if (cancelled || location.href !== pageUrl) return fail("采集取消或列表已变化");
-    if (mode === "detail") {
-      const items = (selected || []).map(item => {
+    const confirmed = Array.isArray(first.data.items) ? new Map(first.data.items.map(d => [d.id,d])) : null;
+    if (!confirmed) return fail("网关缺少去重确认，请更新并重启网关");
+    const queueRefs = selected.filter(item => ["new", "changed", "retry"].includes(confirmed.get(item.id)?.kind));
+    const confirmedSkip = skipped + Array.from(confirmed.values()).filter(item => item.kind === "skip").length;
+    const confirmedManual = manual + Array.from(confirmed.values()).filter(item => item.kind === "manual").length;
+    if (!queueRefs.length) {
+      const phase = `新增 0/${target}；重复跳过 ${confirmedSkip}，待查缺补录 ${confirmedManual}；数据已由其他批次采集`;
+      progress(phase,{status:"partial",new_succeeded:0,duplicates:confirmedSkip,manual_pending:confirmedManual});
+      show(phase,true);
+      return {ok:true,skipped:"already-stored",result:first.data};
+    }
+    if (mode === "detail" || queueRefs.some(item => ["changed", "retry"].includes(confirmed.get(item.id)?.kind)
+        || confirmed.get(item.id)?.missing?.length)) {
+      const items = queueRefs.filter(item => mode === "detail" || confirmed.get(item.id)?.kind !== "new"
+        || confirmed.get(item.id)?.missing?.length).map(item => {
         const title = item.card.querySelector(".smallCardTitle, .bigCardTitle");
-        return {id:item.id, url:item.url, prefix:title ? title.getAttribute("productname") || title.textContent || "" : ""};
+        const d = confirmed.get(item.id);
+        return {id:item.id, url:item.url, kind:mode === "list" && d.kind === "new" ? "retry" : d.kind, snapshot_round:d.snapshot_round,
+          prefix:title ? title.getAttribute("productname") || title.textContent || "" : ""};
       });
+      items.sort((a,b) => Number(b.kind === "retry") - Number(a.kind === "retry"));
       const result = await bg({type:"detail-start", taskId, items, round:first.data.round,
+                               duplicates:confirmedSkip, manual_pending:confirmedManual,
+                               new_succeeded:first.data.new_listings,
                                detail_interval_ms:CONFIG.detail_interval_ms});
       if (!result.ok) return fail(result.err || "详情队列启动失败");
       show(`详情队列已启动，共 ${total} 张；进度见扩展弹窗`, true);
@@ -353,12 +493,13 @@
     }
     const d = first.data;
     const missing = first.titleStats ? first.titleStats.cards - first.titleStats.captured : 0;
-    const complete = !missing && total >= target && d.cards_parsed === total;
+    const complete = !missing && freshCount >= target && d.accepted_ids.length === total;
     if (complete) markIngested();
-    const phase = `已入库 ${d.cards_parsed}/${target} 张` + titleStatus(first.titleStats)
-      + (total < target ? `；仅加载出 ${total} 张` : "");
+    const phase = `新增 ${d.new_listings}/${target}，更新 ${d.updated_ids.length}，重复跳过 ${confirmedSkip}，待补录 ${confirmedManual}`
+      + titleStatus(first.titleStats) + (freshCount < target ? `；新账号不足（${stats.stop}）` : "");
     progress(phase, {status:complete ? "done" : "partial", total, processed:total,
-      succeeded:Math.max(0, d.cards_parsed - missing), failed:Math.max(missing, total - d.cards_parsed)});
+      succeeded:d.accepted_ids.length, failed:missing, new_succeeded:d.new_listings,
+      duplicates:confirmedSkip, updated:d.updated_ids.length, manual_pending:confirmedManual});
     show(phase, complete);
     return {ok:true, result:d, sweep:stats, title_collection:first.titleStats};
   }
@@ -382,11 +523,21 @@
 
   // ---------- 弹窗「采集本页」入口 ----------
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type === "verification-confirmed") {
+      if (msg.taskId !== taskId || !VERIFY || VERIFY.detect(document, window).blocked) {
+        sendResponse({ok:false, err:"页面仍有验证，或任务已变化"}); return false;
+      }
+      manualVerificationConfirmed = true;
+      sendResponse({ok:true}); return false;
+    }
     if (msg && msg.type === "detail-completed") {
       if (location.href === msg.url) {markIngested(); show("详情队列全部入库完成", true);}
       sendResponse({ok:true}); return false;
     }
     if (msg && msg.type === "collect-cancel") {
+      if (taskId && msg.taskId && taskId !== msg.taskId) {sendResponse({ok:false}); return false;}
+      manualVerificationConfirmed = false;
+      show("已取消；已入库数据保留，可重新采集本页", true);
       cancelled = true; sendResponse({ok:true}); return false;
     }
     if (msg && msg.type === "collect-now") {
@@ -398,7 +549,7 @@
   });
 
   // ---------- 入口 ----------
-  bg({type:"detail-context"}).then(async context => {
+  bg({type:"detail-context", pageUrl:location.href}).then(async context => {
     workerPage = !!context.worker;
     if (workerPage) {
       if (context.job) {
@@ -409,7 +560,7 @@
     }
     await fetchConfig();
     // 来自看板的明确补齐操作，采集一次，不改变用户的自动采集开关。
-    setTimeout(() => { ingest(requestedDetail()); }, CONFIG.spa_settle_ms || SPA_SETTLE_DEFAULT_MS);
+    setTimeout(() => { ingest(requestedDetail(), context.resumeTask); }, CONFIG.spa_settle_ms || SPA_SETTLE_DEFAULT_MS);
   });
   setInterval(fetchConfig, CONFIG_POLL_MS);
 })();

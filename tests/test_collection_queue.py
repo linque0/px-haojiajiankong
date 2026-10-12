@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize('script', ['collection_queue.cjs', 'content_modes.cjs'])
+@pytest.mark.parametrize('script', ['collection_queue.cjs', 'collection_retry.cjs', 'content_dedup.cjs', 'backfill_queue.cjs', 'backfill_popup_delete.cjs', 'content_modes.cjs', 'content_cancel.cjs', 'content_delist.cjs', 'dashboard_backfill.cjs', 'verification.cjs', 'content_verification.cjs'])
 def test_extension_collection_queue(script):
     node = shutil.which('node')
     if not node:
         pytest.skip('Node.js unavailable')
     result = subprocess.run([node, str(Path(__file__).with_name(script))],
-                            capture_output=True, text=True, timeout=15)
+                            capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr

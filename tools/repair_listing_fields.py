@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pxb7 import config, db, extract as X, gateway as G, parser as P, pipeline as PL
+from pxb7 import weapons as W
 
 FIELDS = ("level", "yellow_cnt", "five_star_chars", "five_star_weapons", "favorites_cnt")
 
@@ -110,6 +111,8 @@ def repair(settings, *, apply=False, paid_items_only=False, character_chains_onl
                         item['favorites_cnt'] = favorites
                     features = X.extract_listing(keywords, listing_id=listing_id,
                                                  title=title, card_fields=attributes).features
+                    if task.game_id == 10302:
+                        features[W.FEATURE] = W.observe(title, P.detail_product_text(html), attributes, features)
                     features['_detail_fields'] = list(attributes)
                     features['_detail_rosters'] = [key for key in
                         ('five_star_character_chains', 'five_star_weapon_refinements') if key in features]

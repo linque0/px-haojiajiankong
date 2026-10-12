@@ -86,6 +86,14 @@
   .cell-details[open] .cell-preview, .cell-details[open] .cell-expand,
   .cell-details:not([open]) .cell-collapse { display: none; }
   .cell-full { margin-top: 4px; }
+  .map-details[open] { width: 640px; min-width: 640px; max-width: 640px; }
+  .map-details .cell-full { max-height: 380px; overflow: auto; padding: 6px;
+      border: 1px solid var(--line); border-radius: 6px; }
+  .map-details table { table-layout: fixed; }
+  .map-details th:first-child { width: 82px; }
+  .map-details th:nth-child(2) { width: 62px; }
+  .map-details td { vertical-align: top; }
+  #listings > tbody > tr > td { vertical-align: top; }
   .cell-details summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 </style>
 </head>
@@ -149,6 +157,7 @@
     <h2>入库数据（可翻页；列名按所选游戏自己的关键词）</h2>
     <div class="toolbar">
       <label>游戏筛选 <select id="l-game"></select></label>
+      <label>展示模式 <select id="l-mode"><option value="rounds">采集轮次</option><option value="history">账号历史痕迹</option></select></label>
       <label>每页 <select id="l-size">
         <option value="15">15</option>
         <option value="30">30</option>
@@ -165,6 +174,39 @@
     </div>
     <p class="muted">— 表示未采到，0 表示明确为零。超过30字的文本默认折叠，点击展开查看全文。列表采集优先复用完整标题，缺失时按商品编号限速补采。也可在扩展选择「详情页采集」，逐个正常打开商品读取角色链数与武器精炼；进度与待补齐数量见扩展弹窗。若遇网站验证，完成验证后重新采集本页。</p>
     <div style="overflow-x:auto"><table id="listings"><thead><tr></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section>
+    <h2>信息查缺补录（每个商品的最新快照；补录由扩展后台领取执行）</h2>
+    <div class="toolbar">
+      <label>游戏 <select id="bf-game"></select></label>
+      <button class="ghost mini" id="bf-refresh">刷新</button>
+      <span id="bf-total" class="muted"></span>
+      <span id="bf-job" class="warn-note"></span>
+      <span style="flex:1"></span>
+      <button class="ghost mini" id="bf-first" disabled>首页</button>
+      <button class="ghost mini" id="bf-prev" disabled>上一页</button>
+      <span id="bf-page" class="muted">—</span>
+      <button class="ghost mini" id="bf-next" disabled>下一页</button>
+      <button class="ghost mini" id="bf-last" disabled>末页</button>
+    </div>
+    <div id="bf-coverage" class="muted"></div>
+    <div style="overflow-x:auto"><table id="bf-list"><thead><tr>
+      <th style="width:32px"></th><th>编号</th><th>游戏</th><th>轮次</th><th>缺失项</th><th>最近补录</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="toolbar" style="margin-top:8px">
+      <button class="mini" id="bf-backfill" disabled>补录选中</button>
+      <button class="ghost mini" id="bf-all" disabled>全选</button>
+      <button class="ghost mini" id="bf-check-failed">勾选本页补录失败／未补齐</button>
+      <button class="ghost mini" id="bf-delete" disabled>删除选中</button>
+      <button class="ghost mini" id="bf-sync-retry" hidden>重试同步数据表</button>
+      <span id="bf-note" class="muted"></span>
+    </div>
+    <p class="muted" style="margin:6px 0 0">
+      鸣潮检查必填列（等级/黄数/五星角色/五星武器/共鸣链/武器精炼/资源/区服/发布时间/收藏），
+      其他游戏检查已支持的关键字段；0 是有效值，额外付费商品允许为空，不计缺失。全选再按一次即取消全选。
+      「补录选中」由网关备份后排队、扩展空闲时自动领取执行（需浏览器与扩展在线）；下架商品自动跳过并标记补录失败。
+      「删除选中」删除商品<b>全部入库轮次</b>及关联数据，操作前自动备份；每次最多 200 个商品。</p>
   </section>
 
   <div class="cols">
@@ -221,7 +263,7 @@
       <label><input type="checkbox" id="c-auto"> 自动采集（浏览到列表/详情页时入库）</label>
       <label>扩展采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
       <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
-      <label>每次采集张数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
+      <label>每次新增账号数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
       <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="0" max="10" step="0.1"></label>
       <label>详情采集间隔（秒）<input type="number" id="c-detail-interval" min="0" max="10" step="0.1"></label>
@@ -300,7 +342,7 @@ function renderBatches(rows) {
         ? `卡片 ${b.cards_seen} 张`
         : `详情 ${b.listing_id}`;
       const res = b.kind === "cards"
-        ? `入库 ${b.snapshots}（新 ${b.new_listings}，解析率 ${(b.parse_success_rate * 100).toFixed(0)}%）`
+        ? `入库 ${b.snapshots}（新增 ${b.new_listings}，更新 ${b.updated || 0}，重复跳过 ${b.duplicates || 0}，待重试 ${b.retry_pending || 0}，待补录 ${b.manual_pending || 0}，解析率 ${(b.parse_success_rate * 100).toFixed(0)}%）`
         : `回填 ${b.rows_updated} 行（浏览 ${b.viewers_masked ?? "—"}，收藏 ${b.favorites_cnt ?? "—"}）`;
       return `<tr><td class="num">${esc(b.at)}</td><td>${b.kind === "cards" ? "列表" : "详情"}` +
              `</td><td>${esc(detail)}</td><td class="num">${esc(res)}</td></tr>`;
@@ -358,6 +400,13 @@ function render(s) {
       ? `扩展 v${ext.installed_version}（最新）`
       : (ext.latest_version ? `扩展 最新 v${ext.latest_version}（尚未收到上报）` : "扩展 未检测到");
     $("ext-pill").style.color = "";
+  }
+  if (s.csv_sync_status) {
+    const failed = Object.values(s.csv_sync_status).filter(result => !result.ok);
+    bfState.pendingSync = failed.map(result => result.game_id);
+    $("bf-sync-retry").hidden = !failed.length;
+    $("bf-sync-retry").title = failed.map(result => `游戏 ${result.game_id}：${result.error || "同步失败"}`).join("；");
+    if (failed.length) $("bf-sync-retry").textContent = `重试同步数据表（${failed.map(result => result.game_id).join("、")}）`;
   }
   const st = s.stats;
   const rate = st.cards_seen ? (st.cards_parsed / st.cards_seen * 100).toFixed(0) + "%" : "—";
@@ -562,7 +611,75 @@ $("stopgw").addEventListener("click", async () => {
 });
 
 // ---------- 数据浏览：按游戏换列名 + 翻页（不只最近 15 条） ----------
-const listState = { gameId: 0, offset: 0, limit: 15, total: 0 };
+const listState = { gameId: 0, offset: 0, limit: 15, total: 0, mode:"rounds" };
+const historyPanels = new Map();
+const historyLabels = {price_yuan:"挂牌价",title:"标题",level:"等级",yellow_cnt:"黄数",
+  five_star_chars:"五星角色数",five_star_weapons:"五星武器数",server:"区服",favorites_cnt:"收藏",
+  viewers_masked:"浏览人数",publish_time_text:"发布时间",five_star_character_chains:"角色链数",
+  five_star_weapon_refinements:"武器精炼",astrite_cnt:"星声",lunite_cnt:"月相",
+  five_star_weapon_information:"武器信息采集状态",state:"状态",source:"来源",reason:"依据",
+  "five_star_weapon_information.state":"武器信息状态",
+  "five_star_weapon_information.source":"武器信息来源",
+  "five_star_weapon_information.reason":"武器信息依据",
+  afterglow_coral_cnt:"余波珊瑚",wuwa_map_exploration:"地图探索度"};
+function historyValue(value) {
+  return value == null ? "未知" : esc(typeof value === "object" ? JSON.stringify(value) : value);
+}
+function historyContent(data) {
+  const sourceNames = {"legacy-baseline":"旧快照基线（未保存的旧字段未知）",list:"列表采集",
+    detail:"详情采集",backfill:"查缺补录",baseline:"采集前基线", "weapon-information-replay":"已有详情离线补标记"};
+sourceNames["manual-confirmation"] = "人工确认修正";
+  return (data.rows || []).map(r => `<article style="margin:12px 0;max-width:900px;white-space:normal">` +
+    `<strong>版本 ${r.version} · ${esc(r.captured_at)}</strong> <span class="muted">${esc(sourceNames[r.source] || r.source)}</span>` +
+    ((r.diff || []).length ? `<table><thead><tr><th>字段</th><th>原情况</th><th>变化后</th><th>标注</th></tr></thead><tbody>` +
+      r.diff.map(d => `<tr><td>${esc(historyLabels[d.field.replace(/^extracted_features\./, "")] || d.field)}</td>` +
+        `<td style="white-space:normal">${historyValue(d.before)}</td><td style="white-space:normal">${historyValue(d.after)}</td>` +
+        `<td>${d.kind === "supplement" ? "补齐信息" : "字段变化"}</td></tr>`).join("") + `</tbody></table>` : `<p class="muted">首次基线</p>`) +
+    `<details><summary>查看此版本完整数据</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(JSON.stringify(r.data,null,2))}</pre></details></article>`
+  ).join("") + `<div>第 ${Math.floor(data.offset / data.limit)+1} 页 · 共 ${data.total} 个版本 ` +
+    `<button class="ghost mini" data-history-page="${data.listing_id}" data-offset="${Math.max(0,data.offset-data.limit)}" ${data.offset ? "" : "disabled"}>上一页</button> ` +
+    `<button class="ghost mini" data-history-page="${data.listing_id}" data-offset="${data.offset+data.limit}" ${data.offset+data.limit<data.total ? "" : "disabled"}>下一页</button></div>`;
+}
+function historyCell(row) {
+  let p = historyPanels.get(row.listing_id);
+  if (!p) {p = {open:false,offset:0};historyPanels.set(row.listing_id,p);}
+  if (p.version !== row.versions) {p.data=null;p.version=row.versions;}
+  return `<td><details data-history-id="${esc(row.listing_id)}" ${p.open ? "open" : ""}>` +
+    `<summary>${row.versions || 0} 个版本 · ${esc(row.changed_at || "未知")}</summary>` +
+    `<div data-history-body="${esc(row.listing_id)}">${p.data ? historyContent(p.data) : "展开后加载历史…"}</div></details></td>`;
+}
+async function loadHistory(id, offset=0) {
+  const p = historyPanels.get(id);
+  if (!p || p.loading) return;
+  p.loading=true;p.offset=offset;
+  try {
+    const params = new URLSearchParams({id,offset:String(offset),limit:"15"});
+    const response = await fetch("/listings/history?" + params);
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || "历史查询失败");
+    p.data=data;
+    const body=$("listings").querySelector(`[data-history-body="${id}"]`);
+    if (body) body.innerHTML=historyContent(data);
+  } catch(error) {
+    const body=$("listings").querySelector(`[data-history-body="${id}"]`);
+    if (body) body.textContent=`历史加载失败：${error.message}；重新展开可重试`;
+  } finally {p.loading=false;}
+}
+$("listings").addEventListener("toggle", event => {
+  const id=event.target.dataset?.historyId;
+  if (!id) return;
+  const p=historyPanels.get(id);
+  if (!p) return;
+  p.open=event.target.open;
+  if (p.open && !p.data) loadHistory(id,p.offset);
+},true);
+$("listings").addEventListener("click",event => {
+  const button=event.target.closest?.("[data-history-page]");
+  if (button && !button.disabled) loadHistory(button.dataset.historyPage,Number(button.dataset.offset));
+});
+$("l-mode").addEventListener("change", () => {
+  listState.mode=$("l-mode").value;listState.offset=0;loadListings();
+});
 let lastStats = null;
 let gamesSig = "";
 let listingsRequest = 0;
@@ -577,6 +694,14 @@ function saveExpandedCells() {
 
 const cellText = (v, key, identity) => {
   if (v === null || v === undefined || v === "") return "—";
+  if (key === "map_exploration" && v.maps) {
+    const labels = {astrite:"星声"};
+    const amounts = obj => Object.entries(labels).map(([k,label]) => `${label}：${obj[k] == null ? "未知" : "约" + fmt(Math.round(obj[k] * 100) / 100)}`).join("；");
+    const preview = `${v.partial ? "部分地图估算" : "地图估算"} · ${v.observed_maps} 张 · 剩余${amounts(v.remaining)} · 大致估算`;
+    const content = v.maps.map(m => `<tr><td>${esc(m.name)}</td><td>${m.progress == null ? "未知" : esc(m.progress) + "%"}</td><td>${esc(amounts(m.total))}</td><td>${esc(amounts(m.remaining))}</td></tr>`).join("");
+    return `<details class="cell-details map-details" data-cell="${esc(identity)}"${expandedCells.has(identity) ? " open" : ""}><summary><span class="cell-preview">${esc(preview)}</span><span class="cell-action"><span class="cell-expand">展开地图探索度</span><span class="cell-collapse">收起地图探索度</span></span></summary>`
+      + `<div class="cell-full">${esc(preview)}<br>星声折算约 ${v.remaining_astrite_pulls == null ? "未知" : esc(Math.round(v.remaining_astrite_pulls * 100) / 100)} 抽；星声统计覆盖 ${esc(Math.round(v.coverage.astrite * 100))}%（${v.estimated_maps}/${v.expected_maps} 张）；潜在资源与当前余额分开。<table><thead><tr><th>地图</th><th>探索度</th><th>资源总量</th><th>预计剩余资源</th></tr></thead><tbody>${content}</tbody></table></div></details>`;
+  }
   let text;
   if (Array.isArray(v)) {
     if (key === "resources") {
@@ -601,6 +726,20 @@ const cellText = (v, key, identity) => {
   }
   return `<span class="cell-text">${esc(text)}</span>`;
 };
+
+function weaponCell(row, key) {
+  if (key !== "five_star_weapons" && key !== "five_star_weapon_refined") return null;
+  const info = row.weapon_information || {};
+  const count = (row.cells || {}).five_star_weapons;
+  const empty = count === 0 ? "none" : info.state;
+  if (empty === "none") return key === "five_star_weapons" ? "0（已确认无）" : "不适用（无五星武器）";
+  if (empty === "unreported") return `<span title="${esc(info.reason || '')}">已采集·页面未提供</span>`;
+  if ((row.cells || {})[key] == null) {
+    return `<span title="${esc(info.reason || '未采到或无法解析')}">未采到／解析失败</span> ` +
+      `<a href="https://www.pxb7.com/product/${encodeURIComponent(row.listing_id)}/1#pxb7-collect-detail" target="_blank" rel="noopener noreferrer">打开详情补齐</a>`;
+  }
+  return null;
+}
 
 function fillGameSelects(games, current) {
   const options = ['<option value="0">全部游戏（通用列）</option>'].concat(
@@ -628,6 +767,7 @@ function renderKeywordsPanel(s) {
 async function loadListings() {
   const requestId = ++listingsRequest;
   const params = new URLSearchParams({ game_id: String(listState.gameId),
+                                       mode:listState.mode,
                                        limit: String(listState.limit),
                                        offset: String(listState.offset) });
   let data;
@@ -654,6 +794,7 @@ async function loadListings() {
   $("listings").querySelector("thead tr").innerHTML =
     ["listing_id", "游戏", "轮次", "价格 ¥"].map(h => `<th>${h}</th>`).join("") +
     cols.map(c => `<th title="取值来源：${c.source === "feat" ? "抽取特征 extracted_features" : "卡片字段"}">${esc(c.label)}</th>`).join("") +
+    (listState.mode === "history" ? "<th>账号历史痕迹</th>" : "") +
     (showViewers ? ["浏览", "收藏"] : ["收藏"]).map(h => `<th>${h}</th>`).join("");
   $("listings").querySelector("tbody").innerHTML = (data.rows || []).map(r =>
     `<tr><td class="num"><a href="https://www.pxb7.com/product/${encodeURIComponent(r.listing_id)}/1#pxb7-collect-detail" target="_blank" rel="noopener noreferrer" title="打开商品详情并采集一次">${esc(r.listing_id)}</a></td>` +
@@ -662,20 +803,17 @@ async function loadListings() {
     `<td class="num">${fmt(r.price)}</td>` +
     cols.map(c => {
       const value = (r.cells || {})[c.key];
-      if (c.key === "five_star_weapon_refined" && (r.cells || {}).five_star_weapons === 0) {
-        return `<td class="num">无五星武器</td>`;
-      }
-      if ((c.key === "five_star_weapons" || c.key === "five_star_weapon_refined") && value == null) {
-        return `<td><a href="https://www.pxb7.com/product/${encodeURIComponent(r.listing_id)}/1#pxb7-collect-detail" target="_blank" rel="noopener noreferrer">打开详情补齐</a></td>`;
-      }
+      const weapon = weaponCell(r, c.key);
+      if (weapon != null) return `<td class="num">${weapon}</td>`;
       const identity = JSON.stringify([r.game_id, r.listing_id, r.round, c.key]);
       return `<td class="num">${cellText(value, c.key, identity)}</td>`;
     }).join("") +
+    (listState.mode === "history" ? historyCell(r) : "") +
     (showViewers ? `<td class="num">${fmt(r.viewers)}</td>` : "") +
     `<td class="num">${fmt(r.favorites)}</td></tr>`
   ).join("") || `<tr><td colspan="${4 + cols.length + (showViewers ? 2 : 1)}" class="muted">暂无数据</td></tr>`;
 
-  $("l-total").textContent = `共 ${fmt(listState.total)} 行`;
+  $("l-total").textContent = `共 ${fmt(listState.total)} ${listState.mode === "history" ? "个账号" : "行"}`;
   $("l-page").textContent = `第 ${page} / ${pages} 页`;
   $("l-first").disabled = $("l-prev").disabled = page <= 1;
   $("l-last").disabled = $("l-next").disabled = page >= pages;
@@ -708,6 +846,233 @@ $("l-size").addEventListener("change", () => {
   renderKeywordsPanel(lastStats);       // 词表面板跟随同一游戏筛选
 }));
 
+// ---------- 信息查缺补录（与扩展弹窗同功能：查看/全选/补录/删除/重试同步） ----------
+const bfState = {gameId:"selected", offset:0, rows:[], total:0, games:[], coverage:{},
+                 loading:false, dirty:false, selection:new Map(), starting:false, allLoading:false,
+                 pendingSync:[]};
+const BF_PAGE = 10;
+const BF_ERROR_TEXT = {"target-not-selected":"请先勾选对应游戏的采集目标",
+  "selection-changed-refresh-list":"缺失清单已变化，请刷新后重新勾选",
+  "latest-snapshot-changed":"已出现新快照，旧目标已跳过，请刷新清单",
+  "delete-selection-limit":"每次请选择 1～200 个商品删除",
+  "delete-confirmation-required":"请确认删除全部轮次",
+  "delisted":"商品已下架，无法补录",
+  "no-candidates":"当前范围已无待补录记录"};
+const bfError = e => BF_ERROR_TEXT[e] || e;
+const bfReason = reasons => (reasons || []).map(r => `${r.label}：${r.reason}`).join("；");
+function bfNote(text) { $("bf-note").textContent = text; }
+async function bfPost(path, payload) {
+  try {
+    return await (await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload)})).json();
+  } catch (e) { return {ok:false, error:"网络错误：" + e.message}; }
+}
+let bfGamesSig = "";
+function bfFillGameSelect() {
+  const sig = JSON.stringify(bfState.games);
+  if (sig === bfGamesSig) return;              // 自动刷新不重绘，避免打断选择
+  bfGamesSig = sig;
+  $("bf-game").innerHTML = '<option value="selected">已勾选游戏</option><option value="all">全部游戏</option>'
+    + bfState.games.map(g => `<option value="${g.game_id}">${esc(g.game_name)}（缺 ${g.missing}）</option>`).join("");
+  $("bf-game").value = bfState.gameId;
+}
+function bfButtons() {
+  const collectable = Array.from(bfState.selection.values()).some(r => r.collectable);
+  $("bf-backfill").textContent = `补录选中（${bfState.selection.size}）`;
+  $("bf-backfill").disabled = bfState.starting || !collectable;
+  $("bf-all").textContent = bfState.selection.size ? "取消全选" : "全选";
+  $("bf-all").disabled = bfState.allLoading;
+  $("bf-delete").textContent = `删除选中（${bfState.selection.size}）`;
+  $("bf-delete").disabled = bfState.starting || !bfState.selection.size || bfState.selection.size > 200;
+}
+function bfRender() {
+  $("bf-list").querySelector("tbody").innerHTML = bfState.rows.map(row => {
+    // 最近补录状态来自网关台账（扩展队列实时上报），弹窗与看板同源。
+    const last = row.last_backfill;
+    const latest = last ? `${({complete:"已补齐", incomplete:"仍有缺项", failed:"失败"})[last.status] || last.status}`
+      + (last.error ? `（${bfError(last.error)}）` : "") + ` · ${esc(last.at)}` : "尚无补录记录";
+    return `<tr><td><input type="checkbox" data-bf-id="${esc(row.id)}"${bfState.selection.has(row.id) ? " checked" : ""}></td>`
+      + `<td class="num"><a href="https://www.pxb7.com/product/${encodeURIComponent(row.id)}/1" target="_blank" rel="noopener noreferrer">${esc(row.id)}</a></td>`
+      + `<td>${esc(row.game_name)}${row.collectable ? "" : ' <span class="muted">（未启用采集目标）</span>'}</td>`
+      + `<td class="num">${esc(row.snapshot_round)}</td>`
+      + `<td class="cell-text">${esc(bfReason(row.missing))}</td>`
+      + `<td class="muted">${latest}</td></tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">该范围暂无缺失记录</td></tr>';
+  $("bf-list").querySelectorAll("input[data-bf-id]").forEach(input => input.addEventListener("change", () => {
+    const row = bfState.rows.find(r => r.id === input.dataset.bfId);
+    if (!row) return;
+    if (input.checked) bfState.selection.set(row.id,
+      {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+    else bfState.selection.delete(row.id);
+    bfButtons();
+  }));
+  bfButtons();
+}
+async function bfJobStatus() {
+  try {
+    const r = await (await fetch("/backfill/job")).json();
+    const job = r?.job;
+    if (!job) { $("bf-job").textContent = ""; return; }
+    const labels = {pending:"等待扩展领取（需浏览器与扩展在线）", claimed:"扩展已领取，正在开始",
+                    accepted:"扩展执行中；结果以清单刷新为准", failed:"扩展启动失败"};
+    $("bf-job").textContent = `补录任务（${fmt(job.total)} 条）：${labels[job.status] || job.status}`
+      + (job.error ? `：${job.error}` : "");
+  } catch (e) { $("bf-job").textContent = ""; }
+}
+let bfRequest = 0;
+async function refreshBackfill(force = false) {
+  if (bfState.loading) {
+    if (force) bfState.dirty = true;   // 在飞查询结束后补跑：删除/排队后的强刷不被吞掉
+    return;
+  }
+  bfState.loading = true;
+  const requestId = ++bfRequest;
+  const game = bfState.gameId;
+  try {
+    const params = new URLSearchParams({game_id:game, offset:String(bfState.offset), limit:String(BF_PAGE)});
+    const data = await (await fetch("/backfill/candidates?" + params.toString())).json();
+    if (requestId !== bfRequest) return;
+    if (!data || !data.ok) { $("bf-total").textContent = "查询失败：" + (data?.error || "无响应"); return; }
+    bfState.total = data.total;
+    if (bfState.offset >= bfState.total && bfState.offset > 0) {
+      bfState.offset = Math.max(0, Math.floor((bfState.total - 1) / BF_PAGE) * BF_PAGE);
+      return refreshBackfill();
+    }
+    bfState.rows = data.rows || [];
+    bfState.games = data.games || [];
+    bfState.coverage = data.coverage || {};
+    for (const row of bfState.rows) {          // 轮次变化的选择剔除，其余跨页保留
+      const sel = bfState.selection.get(row.id);
+      if (sel) {
+        if (sel.snapshot_round !== row.snapshot_round) bfState.selection.delete(row.id);
+        else sel.collectable = row.collectable;
+      }
+    }
+    for (const [id, sel] of Array.from(bfState.selection)) {
+      const row = bfState.rows.find(r => r.id === id);
+      if (row?.last_backfill?.status === "complete"
+          && row.last_backfill.snapshot_round === sel.snapshot_round) bfState.selection.delete(id);
+    }
+    bfFillGameSelect();
+    const coverage = game === "all" || game === "selected"
+      ? "按游戏检查关键字段和角色／武器明细" : (bfState.coverage[game] || []).join("、");
+    $("bf-coverage").textContent = "检测范围：" + coverage + "；鸣潮检查必填列；额外付费商品允许为空，不计缺失";
+    $("bf-total").textContent = `${fmt(bfState.total)} 条待补录`;
+    const pages = Math.max(1, Math.ceil(bfState.total / BF_PAGE));
+    $("bf-page").textContent = `第 ${Math.floor(bfState.offset / BF_PAGE) + 1} / ${pages} 页`;
+    $("bf-first").disabled = $("bf-prev").disabled = bfState.offset === 0;
+    $("bf-next").disabled = $("bf-last").disabled = bfState.offset + BF_PAGE >= bfState.total;
+    await bfJobStatus();
+    bfRender();
+  } finally {
+    bfState.loading = false;
+    if (bfState.dirty) { bfState.dirty = false; refreshBackfill(); }
+  }
+}
+async function bfToggleSelectAll() {
+  if (bfState.selection.size) { bfState.selection.clear(); bfRender(); return; }
+  if (bfState.starting || bfState.allLoading) return;
+  bfState.allLoading = true; bfButtons();
+  const game = bfState.gameId;
+  bfNote("正在全选当前范围…");
+  try {
+    for (let offset = 0; offset < 2000; offset += 200) {
+      const params = new URLSearchParams({game_id:game, offset:String(offset), limit:"200"});
+      const data = await (await fetch("/backfill/candidates?" + params.toString())).json();
+      if (!data || !data.ok) { bfNote("全选失败：" + (data?.error || "无响应")); return; }
+      if (game !== bfState.gameId) return;
+      for (const row of data.rows || []) {
+        if (!bfState.selection.has(row.id)) bfState.selection.set(row.id,
+          {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+      }
+      if (!(data.rows || []).length || offset + 200 >= data.total) break;
+    }
+    bfNote(bfState.selection.size
+      ? `已全选 ${bfState.selection.size} 条；可翻页取消个别勾选，再点「补录选中」或「删除选中」`
+      : "当前范围没有可勾选的记录");
+  } finally {
+    bfState.allLoading = false;
+    bfRender();
+  }
+}
+$("bf-game").addEventListener("change", (e) => {
+  bfState.gameId = e.target.value; bfState.offset = 0; bfState.selection.clear(); refreshBackfill(true);
+});
+$("bf-refresh").addEventListener("click", () => refreshBackfill(true));
+$("bf-first").addEventListener("click", () => { bfState.offset = 0; refreshBackfill(); });
+$("bf-prev").addEventListener("click", () => { bfState.offset = Math.max(0, bfState.offset - BF_PAGE); refreshBackfill(); });
+$("bf-next").addEventListener("click", () => { bfState.offset += BF_PAGE; refreshBackfill(); });
+$("bf-last").addEventListener("click", () => {
+  const pages = Math.max(1, Math.ceil(bfState.total / BF_PAGE));
+  bfState.offset = (pages - 1) * BF_PAGE; refreshBackfill();
+});
+$("bf-all").addEventListener("click", () => bfToggleSelectAll());
+$("bf-check-failed").addEventListener("click", () => {
+  for (const row of bfState.rows) {
+    const last = row.last_backfill;
+    if (last?.snapshot_round === row.snapshot_round && ["failed", "incomplete"].includes(last.status)) {
+      bfState.selection.set(row.id, {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+    }
+  }
+  bfRender();
+});
+$("bf-backfill").addEventListener("click", async () => {
+  const items = Array.from(bfState.selection.values());
+  const ready = items.filter(item => item.collectable);
+  const skipped = items.length - ready.length;
+  if (!ready.length) { bfNote("选中记录均未启用对应游戏采集目标；请先在「采集目标」勾选后再补录"); return; }
+  bfState.starting = true; bfButtons(); bfNote("正在校验清单并备份数据库…");
+  try {
+    const r = await bfPost("/backfill/enqueue", {game_id:bfState.gameId, items:ready});
+    if (r?.ok) {
+      bfState.selection.clear();
+      bfNote(`已排队 ${r.total} 条${skipped ? `；已跳过 ${skipped} 条未启用游戏记录` : ""}，等待扩展领取执行。备份：${r.backup}`);
+    } else if (r?.error === "selection-changed-refresh-list") {
+      bfState.selection.clear();
+      bfNote("清单已变化，未排队补录；已刷新清单，请重新勾选");
+    } else bfNote("补录未排队：" + bfError(r?.error || "未知错误"));
+  } finally {
+    bfState.starting = false;
+    await refreshBackfill(true);
+  }
+});
+$("bf-delete").addEventListener("click", async () => {
+  const items = Array.from(bfState.selection.values()).map(({id, snapshot_round}) => ({id, snapshot_round}));
+  if (bfState.starting || !items.length || items.length > 200) return;
+  if (!window.confirm(`删除选中的 ${items.length} 个商品？\n将删除这些商品的全部入库轮次、价格变动、关键词及下架记录，并更新游戏 CSV。\n删除前自动备份；没有一键撤销，恢复备份会覆盖之后的数据库改动。\n商品编号：${items.map(item => item.id).join("、")}`)) return;
+  bfState.starting = true; bfButtons(); bfNote("正在校验缺失数据、备份并删除…");
+  try {
+    const r = await bfPost("/backfill/delete", {items, confirm_all_rounds:true});
+    if (r?.ok) {
+      const deleted = new Set(r.deleted_ids);
+      for (const id of deleted) bfState.selection.delete(id);
+      bfState.rows = bfState.rows.filter(row => !deleted.has(row.id));   // 即时移除已删行
+      bfState.pendingSync = (r.results || []).filter(x => !x.ok).map(x => x.game_id);
+      $("bf-sync-retry").hidden = !bfState.pendingSync.length;
+      const synced = (r.results || []).filter(x => x.ok).map(x => x.game_id);
+      bfNote(`已删除 ${r.deleted} 个商品、${r.counts.fct_listing_snapshot} 条快照。`
+        + (synced.length ? `数据表已同步：${synced.join("、")}。` : "")
+        + (bfState.pendingSync.length ? `数据表待同步：${bfState.pendingSync.join("、")}，请点击重试同步。` : "")
+        + `备份：${r.backup}`);
+    } else if (r?.error === "selection-changed-refresh-list") {
+      bfState.selection.clear();
+      bfNote("选中记录已过期或已补齐，未删除任何数据；清单已刷新，请重新勾选");
+    } else bfNote("删除失败：" + bfError(r?.error || "无响应"));
+    await refreshBackfill(true);
+  } finally { bfState.starting = false; bfButtons(); }
+});
+$("bf-sync-retry").addEventListener("click", async () => {
+  if (!bfState.pendingSync.length) return;
+  $("bf-sync-retry").disabled = true;
+  const r = await bfPost("/backfill/sync", {game_ids:bfState.pendingSync});
+  const failedGames = (r?.results || []).filter(x => !x.ok).map(x => x.game_id);
+  bfState.pendingSync = failedGames;
+  $("bf-sync-retry").hidden = !failedGames.length;
+  bfNote(failedGames.length ? `仍有游戏表同步失败：${failedGames.join("、")}；请关闭占用文件后重试`
+                            : "同步重试已完成，数据表已更新 ✓");
+  $("bf-sync-retry").disabled = false;
+});
+
 let timer = null;
 async function refresh() {
   try {
@@ -725,9 +1090,11 @@ $("auto").addEventListener("change", (e) => {
   if (e.target.checked) timer = setInterval(refresh, 5000);
 });
 timer = setInterval(refresh, 5000);
+setInterval(() => refreshBackfill(), 15000);   // 查缺清单独立刷新（15s），避免高频抢占数据库读锁
 $("gw-url").textContent = location.origin;
 refresh();
 loadConfig();
+refreshBackfill();
 </script>
 </body>
 </html>

@@ -18,6 +18,21 @@
   <progress id="collect-progress" max="100" value="0" aria-label="采集进度"></progress>
   <div id="progress-phase" class="muted">选择方式、填写张数，然后采集本页。</div>
   <div class="progress-head"><span id="progress-detail" class="muted"></span><button id="grab" class="mini accent">采集本页</button><button id="cancel-collect" class="mini ghost" disabled>取消采集</button></div>
+  <button id="resume-verification" class="mini accent" hidden>验证已完成，继续</button>
+</section>
+
+<div class="cap">信息查缺补录</div>
+<section class="backfill">
+  <div class="row"><select id="bf-game" aria-label="查缺游戏"><option value="selected">已勾选游戏</option><option value="all">全部游戏</option></select><button id="bf-refresh" class="mini ghost">刷新</button><span id="bf-total" class="muted"></span></div>
+  <div id="bf-coverage" class="muted"></div>
+  <div id="bf-list" aria-live="polite">正在查询…</div>
+  <div class="row"><button id="bf-prev" class="mini ghost">上一页</button><span id="bf-page" class="muted"></span><button id="bf-next" class="mini ghost">下一页</button></div>
+  <div class="row"><button id="bf-selected" class="mini accent" disabled>补录选中</button><button id="bf-all" class="mini accent" disabled>全选</button></div>
+  <div class="row"><button id="bf-check-failed" class="mini ghost">勾选本页补录失败／未补齐</button><button id="bf-delete" class="mini ghost" disabled>删除选中</button></div>
+  <div class="muted">无法补录可手动勾选删除；删除该商品全部轮次及关联数据，操作前备份并同步游戏 CSV。每次最多 200 个商品。</div>
+  <div id="bf-note" class="muted" aria-live="polite"></div>
+  <div id="bf-sync" class="muted"></div><button id="bf-sync-retry" class="mini ghost" hidden>重试同步数据表</button>
+  <div class="muted">只检查最新快照；补录刷新资产信息，保留原价格和轮次。地图探索度为可选信息，缺失不触发查缺。详情采集后在完整看板展开地图，查看预计剩余资源（大致估算）。后台单队列，遇网站验证暂停。</div>
 </section>
 
 <div class="cap">采集设置（保存后生效）</div>
@@ -26,7 +41,8 @@
   <div id="mode-help" class="muted"></div>
   <label><input type="checkbox" id="c-auto"> 自动采集</label>
   <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
-  <label>每次采集张数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>
+  <label>每次新增账号数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>
+  <p class="muted">已采且未变化的账号自动跳过；信息变化时更新，缺项自动补采一次。更新和重试另计。</p>
   <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
   <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="0" max="10" step="0.1" value="3"></label>
   <label>详情采集间隔(秒) <input type="number" id="c-detail-interval" min="0" max="10" step="0.1" value="0"></label>

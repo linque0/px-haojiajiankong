@@ -72,9 +72,18 @@
   /** 在上传副本中标记选中卡片，parser 优先使用语义属性，避免把推荐位/超额卡片入库。 */
   function capture(doc, selected, titles = {}) {
     const clone = doc.documentElement.cloneNode(true);
+    // 下一页替换 DOM 时，保留本次已观察到的真实卡片副本。
+    const present = new Set(selectCards({querySelectorAll:s => clone.querySelectorAll(s)}, Infinity,
+      "https://www.pxb7.com").map(item => item.id));
+    for (const item of selected) {
+      if (!present.has(item.id) && item.node?.cloneNode) {
+        const target = clone.querySelector("body") || clone;
+        target.appendChild(item.node.cloneNode(true));
+      }
+    }
     for (const node of clone.querySelectorAll("[data-listing-id]")) node.removeAttribute("data-listing-id");
     const chosen = new Set(selected.map(item => item.id));
-    const refs = selectCards({querySelectorAll:s => clone.querySelectorAll(s)}, 200, "https://www.pxb7.com");
+    const refs = selectCards({querySelectorAll:s => clone.querySelectorAll(s)}, Infinity, "https://www.pxb7.com");
     for (const item of refs) {
       if (!chosen.has(item.id)) continue;
       item.node.setAttribute("data-listing-id", item.id);

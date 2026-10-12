@@ -28,6 +28,7 @@ import csv
 import datetime as _dt
 import json
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -485,6 +486,7 @@ WUWA_CURATED_HEADERS: tuple[str, ...] = (
     "listing_id", "游戏", "价格 ¥", "等级", "黄数", "五星角色", "五星武器",
     "共鸣链（N命）", "武器精炼（精N）", "资源", "额外付费商品", "区服",
     "商品发布时间", "收藏",
+    "地图探索度", "地图预计剩余资源",
 )
 
 # 精选版式取的数据列（对全部游戏同一组，版式按游戏登记；未登记拒绝导出，不硬套别家术语）
@@ -510,6 +512,16 @@ def _roster_text(entries: Any, *, prefix: str = "", suffix: str = "") -> str | N
 def _fmt_wuwa_cells(row: Mapping[str, Any]) -> list[Any]:
     """一行 v_listing_analysis → 鸣潮看板列单元格（缺失回退与 dashboard 同口径）。"""
     features = json.loads(row["extracted_features"]) if row["extracted_features"] else {}
+    from . import exploration as E
+    from . import weapons as W
+    weapons = row["five_star_weapons"] if row["five_star_weapons"] is not None else features.get("five_star_weapons_cnt")
+    weapon_info = W.status(weapons, features)
+    refinement = (_roster_text(features.get("five_star_weapon_refinements"), prefix="精")
+                  or features.get("five_star_weapon_refined") or row["feat_five_star_weapon_refined"])
+    if weapon_info["resolved_empty"]:
+        refinement = weapon_info["refinement_label"]
+    elif refinement is None:
+        refinement = "未采到／解析失败"
     publish = row["publish_time"]
     return [
         row["listing_id"],
@@ -519,14 +531,11 @@ def _fmt_wuwa_cells(row: Mapping[str, Any]) -> list[Any]:
         row["yellow_cnt"],
         row["five_star_chars"] if row["five_star_chars"] is not None
         else features.get("five_star_chars_cnt"),
-        row["five_star_weapons"] if row["five_star_weapons"] is not None
-        else features.get("five_star_weapons_cnt"),
+        weapons if weapons is not None else weapon_info["label"],
         _roster_text(features.get("five_star_character_chains"), suffix="命")
         or features.get("constellation_cnt")
         or row["feat_constellation_cnt"],
-        _roster_text(features.get("five_star_weapon_refinements"), prefix="精")
-        or features.get("five_star_weapon_refined")
-        or row["feat_five_star_weapon_refined"],
+        refinement,
         "；".join(f"{label}：{features.get(key)}"
                   for key, label in X.WUWA_RESOURCES if features.get(key) is not None) or None,
         "；".join(f"{label}：{'、'.join(str(item) for item in features.get(key) or [])}"
@@ -534,6 +543,8 @@ def _fmt_wuwa_cells(row: Mapping[str, Any]) -> list[Any]:
         row["server"],
         publish.isoformat(sep=" ", timespec="seconds") if publish is not None else None,
         row["favorites_cnt"],
+        E.progress_text(features.get(E.FEATURE)),
+        E.remaining_text(features.get(E.FEATURE)),
     ]
 
 
@@ -586,7 +597,36 @@ def export_curated_csv(settings: Settings, out_path: str | Path | None = None, *
             "game_name": game_name, "bytes": path.stat().st_size}
 
 
+def csv_sync_status(settings: Settings) -> dict[str, Any]:
+    try:
+        data = json.loads((Path(settings.paths.state_dir) / "csv-sync-status.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
+                  game_id: int) -> dict[str, Any]:
+    try:
+        result = _sync_game_csv(settings, conn, game_id=game_id)
+    except Exception as exc:
+        result = {"ok": False, "game_id": int(game_id), "error": f"{type(exc).__name__}: {exc}",
+                  "message": "数据已入库，数据表同步失败，请重试同步"}
+    # 离线回填也能在看板/弹窗显示待同步；成功导出同游戏会清除旧失败。
+    status = csv_sync_status(settings)
+    status[str(int(game_id))] = result
+    path = Path(settings.paths.state_dir) / "csv-sync-status.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("CSV 同步状态保存失败：%s", exc)
+    return result
+
+
+def _sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
                   game_id: int) -> dict[str, Any]:
     """在采集串行锁内同步该游戏最新态，优先原表，原子替换。
 
@@ -594,7 +634,12 @@ def sync_game_csv(settings: Settings, conn: duckdb.DuckDBPyConnection, *,
     返回明确状态，已入库数据不回滚；下一次采集会重新导出全部最新态。
     """
     rel = _relation_for(conn, MAIN_CSV_VIEW, game_id)
-    game_name = rel.aggregate("max(game_name)").fetchone()[0] or str(game_id)
+    game_name = rel.aggregate("max(game_name)").fetchone()[0]
+    if not game_name:
+        # 删除最后一个商品后仍需覆盖原游戏 CSV，而不是另建数字名文件。
+        registered = conn.execute("SELECT game_name FROM dim_game WHERE game_id=? AND biz_prod=1",
+                                  [int(game_id)]).fetchone()
+        game_name = registered[0] if registered else str(game_id)
     label = _INVALID_FILENAME_RE.sub("_", f"{game_name}-{int(game_id)}")
     spec = CURATED_GAME_LAYOUTS.get(int(game_id))
     suffix = "-看板列" if spec else ""

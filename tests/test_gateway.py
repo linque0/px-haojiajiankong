@@ -93,7 +93,8 @@ def test_ingest_cards_is_idempotent(state: G.GatewayState) -> None:
     """用户刷新页面重复发送 → 同轮先删后插，不产生重复行。"""
     s1 = _post(state, "/ingest/cards", CARDS_PAYLOAD)[1]
     s2 = _post(state, "/ingest/cards", CARDS_PAYLOAD)[1]
-    assert s1["snapshots_inserted"] == 2 and s2["snapshots_inserted"] == 2
+    assert s1["snapshots_inserted"] == 2 and s2["snapshots_inserted"] == 0
+    assert len(s2["retry_ids"]) == 2, "已有缺项账号只进入一次补采，不重复写列表"
     status_res = G.handle_status(state)
     assert status_res["db"]["snapshot_rows"] == 2
 
@@ -173,7 +174,9 @@ def test_listings_game_filter_switches_vocabulary(state: G.GatewayState) -> None
     G.handle_config_post(state, {"targets": ["genshin_official", "wuwa_official"]})
     assert _post(state, "/ingest/cards", CARDS_PAYLOAD)[0] == 200
     assert _post(state, "/ingest/cards",
-                 {"url": "https://www.pxb7.com/buy/10302/1", "html": REAL_LIST_HTML})[0] == 200
+                 {"url": "https://www.pxb7.com/buy/10302/1", "html": REAL_LIST_HTML.replace(
+                     "2428022628844555568", "3428022628844555568").replace(
+                     "2427746247312293031", "3427746247312293031")})[0] == 200
     view = G.handle_listings(state, {"game_id": ["10302"]})
     labels = [c["label"] for c in view["columns"]]
     assert "共鸣链（N命）" in labels and "武器精炼（精N）" in labels
@@ -500,7 +503,7 @@ def test_dashboard_and_userscript_assets_exist() -> None:
         assert marker in dashboard, f"看板缺少「目标采集/数据路径」要素：{marker}"
     text = _USERSCRIPT_FILE.read_text(encoding="utf-8")
     assert text.startswith("// ==UserScript==")
-    assert "@connect      127.0.0.1" in text and "@version      0.6.0" in text
+    assert "@connect      127.0.0.1" in text and "@version      0.6.1" in text
     assert "@updateURL" in text and "@downloadURL" in text, "必须带 TM 自动更新源"
     assert "channel=userscript" in text, "版本上报需区分通道"
     # 看板面板（浏览器插件形态）：开关按钮 + 面板骨架 + 关键动作 + 采集目标 + 采集张数

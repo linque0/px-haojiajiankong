@@ -4,6 +4,7 @@ const {clampTarget} = require('../extension/pxb7-extension/sweep.js');
 const source = {tab:{id:10, url:'https://www.pxb7.com/buy/10302/1'}, url:'https://www.pxb7.com/buy/10302/1'};
 const items = Array.from({length:17}, (_,i) => ({id:String(123456+i),url:`https://www.pxb7.com/product/${123456+i}/1`,prefix:'80级'}));
 function fixture(deps) {
+  deps = {retry:async options=>({ok:true,data:{ok:true,claimed:options.action==='claim'}}),...deps};
   const storage = {}, navigations=[], closed=[], ingested=[], messages=[], alarms={};
   const chrome = {
     storage:{local:{async get(k){return structuredClone({[k]:storage[k]});},async set(v){Object.assign(storage,structuredClone(v));}}},
@@ -57,8 +58,39 @@ async function ready(queue, url) {
 
   const risk = fixture(), riskId = await start(risk,1), riskJob = await ready(risk.queue,items[0].url);
   await risk.queue.result({tab:{id:20}}, {taskId:riskId,nonce:riskJob.nonce,error:'verification'});
-  assert.equal((await risk.queue.progress()).progress.status,'paused'); assert.equal(risk.closed.length,0);
+  assert.equal((await risk.queue.progress()).progress.status,'waiting_verification'); assert.equal(risk.closed.length,0);
   assert.equal(risk.navigations.at(-1).active,true); assert.equal(risk.ingested.length,0);
+  assert.equal((await risk.queue.progress()).progress.processed,0,'验证不消耗当前账号');
+  assert.equal((await risk.queue.progress()).progress.failed,0,'验证不计账号失败');
+  assert.equal((await risk.queue.begin(source,{mode:'detail',total:1})).ok,false,'等待验证时不能覆盖队列');
+  const pausedQueue = risk.restart(), worker = {tab:{id:20,url:items[0].url},url:items[0].url};
+  const pausedJob = await ready(pausedQueue,items[0].url);
+  assert.equal(pausedJob.id,riskJob.id); assert.equal(pausedJob.waiting_verification,true);
+  assert.equal(pausedJob.snapshot_round,riskJob.snapshot_round,'SW重启后仍回填原轮次');
+  await pausedQueue.timeout(); assert.equal((await pausedQueue.progress()).progress.processed,0);
+  assert.equal((await pausedQueue.verificationResume({tab:{id:999},url:items[0].url},{taskId:riskId})).ok,false);
+  assert.equal((await pausedQueue.result(worker,{taskId:riskId,nonce:riskJob.nonce,payload:{}})).ok,false);
+  const resumed = await pausedQueue.verificationResume(worker,{taskId:riskId});
+  assert.equal(resumed.ok,true); assert.notEqual(resumed.nonce,riskJob.nonce);
+  await pausedQueue.result(worker,{taskId:riskId,nonce:resumed.nonce,payload:{listing_id:riskJob.id,url:riskJob.url,html:'complete'}});
+  assert.equal((await pausedQueue.progress()).progress.status,'done'); assert.equal(risk.ingested.length,1);
+
+  const sourceRisk = fixture(), sourceBegin = await sourceRisk.queue.begin(source,{mode:'detail',total:64});
+  await sourceRisk.queue.verificationPause(source,{taskId:sourceBegin.taskId});
+  assert.equal((await sourceRisk.queue.context(source)).resumeTask.requested,64);
+  await sourceRisk.queue.cancel();
+  assert.equal((await sourceRisk.queue.progress()).progress.status,'cancelled');
+  assert.equal((await sourceRisk.queue.verificationResume(source,{taskId:sourceBegin.taskId})).ok,false);
+
+  const spa = fixture(), staleSender = {...source, url:source.url+'#old',tab:{...source.tab,url:source.url+'#old'}};
+  const currentUrl = source.url+'#research-X02';
+  const spaBegin = await spa.queue.begin(staleSender,{mode:'detail',total:64,pageUrl:currentUrl});
+  assert.equal(spaBegin.ok,true);
+  assert.equal((await spa.queue.verificationPause(staleSender,{taskId:spaBegin.taskId,pageUrl:currentUrl})).ok,true);
+  assert.equal((await spa.queue.context(staleSender,{pageUrl:currentUrl})).resumeTask.id,spaBegin.taskId);
+  assert.equal((await spa.queue.verificationResume(staleSender,{taskId:spaBegin.taskId,pageUrl:source.url+'#other-task'})).ok,false);
+  assert.equal((await spa.queue.verificationResume(staleSender,{taskId:spaBegin.taskId,pageUrl:currentUrl})).ok,true);
+
 
   const timeout = fixture(); await start(timeout);
   for(let i=0;i<3;i++) await timeout.queue.timeout();
@@ -81,6 +113,10 @@ async function ready(queue, url) {
   quality.setResponse({ok:true,data:{ok:true,snapshot_rows_updated:1,attributes:{five_star_weapons:15},weapon_details_complete:false}});
   await quality.queue.result({tab:{id:20}}, {taskId:qualityId,nonce:qualityJob.nonce,
     payload:{listing_id:qualityJob.id,url:qualityJob.url,html:'只有3条精炼'}});
+  assert.equal((await quality.queue.progress()).progress.status,'running','不完整账号先自动重试一次');
+  const retryJob = await ready(quality.queue,items[0].url);
+  await quality.queue.result({tab:{id:20}}, {taskId:qualityId,nonce:retryJob.nonce,
+    payload:{listing_id:retryJob.id,url:retryJob.url,html:'仍然只有3条精炼'}});
   assert.equal((await quality.queue.progress()).progress.status,'partial');
   assert.equal((await quality.queue.progress()).progress.incomplete,1);
   assert.equal(quality.messages.length,0,'武器不完整不能设源页去重成功');

@@ -293,6 +293,10 @@ def test_wuwa_paid_items_unknown_and_explicit_section_boundaries(state):
     features = X.wuwa_paid_item_features('车架模组：云帛机骑 摩托饰品：绯雪团子 人物皮肤：叱妖诰【官服】')
     assert features == {'vehicle_frame_modules': ['云帛机骑'], 'motorcycle_ornaments': ['绯雪团子'], 'character_skins': ['叱妖诰']}
     assert X.wuwa_paid_item_features('五星角色：安可；摩托饰品；服饰；涂装：深空与歌者') == {}
+    # 段落标题存在但内容为空：写空列表作为「已核为空」标记（2026-10-06 用户指令），
+    # 保留空段落信息；未采到和已核为空都不应触发查缺（docs/20）。
+    assert X.wuwa_paid_item_features('车架模组： 摩托饰品：；人物皮肤：叱妖诰') == {
+        'vehicle_frame_modules': [], 'motorcycle_ornaments': [], 'character_skins': ['叱妖诰']}
 
 
 def test_paid_items_backfill_changes_only_features_and_is_idempotent(state):

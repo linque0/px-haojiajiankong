@@ -1156,13 +1156,13 @@ def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
     最新快照行回填。返回更新的行数（0 = 尚无快照行，调用方应暂存待合并）。
     """
     current = conn.execute(
-        "SELECT snapshot_at, extracted_features FROM fct_listing_snapshot WHERE listing_id = ?"
+        "SELECT snapshot_at, extracted_features, five_star_chars, five_star_weapons FROM fct_listing_snapshot WHERE listing_id = ?"
         + (" AND snapshot_at = ?" if snapshot_at is not None else "")
         + " ORDER BY snapshot_at DESC LIMIT 1",
         [str(listing_id)] + ([snapshot_at] if snapshot_at is not None else [])).fetchone()
     if current is None:
         return 0
-    assignments = ["viewers_masked = ?", "favorites_cnt = COALESCE(?, favorites_cnt)"]
+    assignments = ["viewers_masked = COALESCE(?, viewers_masked)", "favorites_cnt = COALESCE(?, favorites_cnt)"]
     params: list[Any] = [viewers_masked, favorites_cnt]
     for name in ("level", "yellow_cnt", "five_star_chars", "five_star_weapons"):
         if (attributes or {}).get(name) is not None:
@@ -1170,7 +1170,15 @@ def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
             params.append(attributes[name])
     if features:
         merged = json.loads(current[1]) if current[1] else {}
-        merged.update(features)
+        for count, roster, scalar, prior in (
+                ("five_star_chars", "five_star_character_chains", "constellation_cnt", current[2]),
+                ("five_star_weapons", "five_star_weapon_refinements", "five_star_weapon_refined", current[3])):
+            number = (attributes or {}).get(count)
+            if (number is not None and number != prior) or roster in features or number == 0:
+                merged.pop(roster, None)
+                merged.pop(scalar, None)
+        from .collection import merge_known
+        merged = merge_known(merged, features)
         assignments.append("extracted_features = ?")
         params.append(json.dumps(merged, ensure_ascii=False))
     rows = conn.execute(

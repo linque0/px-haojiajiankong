@@ -41,6 +41,8 @@ from . import db
 from . import extract as X
 from . import parser as P
 from . import pipeline as PL
+from . import collection as CC
+from . import weapons as W
 from .collector import (
     _check_component,
     _collect_page_signals,
@@ -153,6 +155,7 @@ class GatewayState:
         self.default_task: Task = default or next(
             (t for t in task_list if t.enabled), task_list[0])
         self.pending_details: dict[str, dict[str, Any]] = {}
+        self.backfill_job: dict[str, Any] | None = None   # 看板发起的补录中转任务（内存态）
         self.recent_batches: deque = deque(maxlen=50)   # 最近批次（看板实时区）
         self.config = load_plugin_config(settings)      # 插件脚本远端配置
         self.script_version: str | None = None          # 用户脚本最近一次上报的版本
@@ -161,6 +164,7 @@ class GatewayState:
         self.extension_seen_at: str | None = None
         # RLock：handle_ingest 外层持锁期间，_ingest_* 里的 note() 会再次进入
         self.lock = threading.RLock()
+        self.collection_db: str | None = None
         self.stats: dict[str, Any] = {
             "batches": 0, "cards_seen": 0, "cards_parsed": 0, "snapshots_inserted": 0,
             "new_listings": 0, "details_stored": 0, "risk_pages_rejected": 0,
@@ -500,6 +504,10 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
                 raise ValueError("only local naive rounds")
         except (ValueError, TypeError):
             return 400, {"ok": False, "error": "invalid-snapshot-round"}
+    backfill = payload.get("backfill") is True
+    if backfill and (snapshot_at is None or not re.fullmatch(r"\d{6,24}", listing_id)
+                     or payload.get("url") != f"https://www.pxb7.com/product/{listing_id}/1"):
+        return 400, {"ok": False, "error": "invalid-backfill-target"}
 
     game_id, biz_prod = _identify_detail_game(state, listing_id, html)
     if game_id is None:
@@ -509,15 +517,26 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
     task = state.match_task(game_id, biz_prod)
     if task is None:
         return _target_not_selected(state, game_id)
+    ensure_collection(state)
 
     fields = _parse_detail_fields(html)
     title, attributes = P.parse_detail_attributes(html)
     extraction = X.extract_listing(X.seed_keywords(game_id=game_id),
                                    listing_id=listing_id, title=title, card_fields=attributes)
+    if game_id == 10302:
+        extraction.features[W.FEATURE] = W.observe(
+            title, P.detail_product_text(html), attributes, extraction.features)
     extraction.features["_detail_fields"] = list(attributes)
+    if game_id == 10302:
+        from . import exploration as E
+        maps = E.parse_html(html)
+        if maps:
+            extraction.features[E.FEATURE] = maps
     extraction.features["_detail_rosters"] = [key for key in
         ("five_star_character_chains", "five_star_weapon_refinements") if key in extraction.features]
     now = _dt.datetime.now()
+    if extraction.features.get("wuwa_map_exploration"):
+        extraction.features["_wuwa_map_source"] = {"collected_at": now.isoformat(timespec="seconds")}
     run_id = new_run_id(f"{task.task_id}-plugin", now=now)
     raw_dir = raw_dir_for(state.settings, task.task_id, run_id, now=now)
     meta = {"url": str(payload.get("url") or ""), "page_type": "detail",
@@ -525,15 +544,32 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
             "collected_at": now.isoformat(timespec="seconds"), "collected_via": "login",
             "channel": "plugin", "parser_version": P.PARSER_VERSION,
             "snapshot_round": payload.get("snapshot_round"),
+            "backfill": backfill,
             "note": "前端 B：读取已加载详情 DOM，回填对应列表轮次", **fields}
     _write_raw(raw_dir, f"detail_{listing_id}", html=html, meta=meta)
 
     entry = {"listing_id": listing_id, "viewers_masked": fields["viewers_masked"],
              "favorites_cnt": fields["favorites_cnt"], "attributes": attributes,
-             "features": extraction.features, "snapshot_at": snapshot_at, "game_id": game_id}
+             "features": extraction.features, "snapshot_at": snapshot_at, "game_id": game_id,
+             "backfill": backfill, "title": title, "retry_token": payload.get("retry_token")}
     updated = _apply_detail(state, entry)
+    # 返回合并后的实际状态；本次未公示不能遮盖已保存的数量/精炼。
+    weapon_features, weapon_count = extraction.features, attributes.get("five_star_weapons")
+    if updated:
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db, read_only=True) as conn:
+            saved = CC.current_data(conn, listing_id, snapshot_at) or {}
+            weapon_features = _parse_features(saved.get("extracted_features")) or weapon_features
+            weapon_count = saved.get("five_star_weapons")
+    weapon_information = W.status(weapon_count, weapon_features)
     if snapshot_at is not None and not updated:
-        return 409, {"ok": False, "error": "snapshot-round-not-found"}
+        return 409, {"ok": False, "error": (entry.get("backfill_result") or {}).get(
+            "error", "snapshot-round-not-found")}
+    if backfill and updated:
+        # 补录结果写入台账，弹窗与完整看板共用同一份"最近补录"状态。
+        from .backfill import record_result
+        result = entry.get("backfill_result") or {}
+        record_result(state, listing_id, snapshot_round=snapshot_at.isoformat(),
+                      status="complete" if result.get("complete") else "incomplete")
     state.note(details_stored=state.stats["details_stored"] + 1)
     state.record_batch(kind="detail", run_id=run_id, listing_id=listing_id,
                        task_id=task.task_id, game_id=game_id,
@@ -546,11 +582,18 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
            "viewers_mask_detected": fields["viewers_mask_detected"],
            "favorites_cnt": fields["favorites_cnt"],
            "attributes": attributes,
-           "weapon_details_complete": (bool(attributes.get("five_star_weapons"))
-                                       and len(extraction.features.get("five_star_weapon_refinements") or [])
-                                       == attributes.get("five_star_weapons")),
+           "weapon_information": weapon_information,
+           "weapon_details_complete": (weapon_information["resolved_empty"] or (
+               W.valid_count(weapon_count) and weapon_count > 0
+               and len(weapon_features.get("five_star_weapon_refinements") or []) == weapon_count
+               and not any(m["key"] == "five_star_weapon_refinements" for m in entry.get("missing", [])))),
            "snapshot_rows_updated": updated,
-           "analysis_sync": entry.get("analysis_sync")}
+           "analysis_sync": entry.get("analysis_sync"),
+           "map_exploration": extraction.features.get("wuwa_map_exploration"),
+           "missing": entry.get("missing", []),
+           "complete": not entry.get("missing", []),
+           "revision_id": entry.get("revision_id"),
+           "backfill": entry.get("backfill_result")}
     if not updated:
         ack["pending"] = ("尚无该 listing 的快照行，详情字段已暂存，"
                           "将随下一批 /ingest/cards 一并入库")
@@ -562,17 +605,45 @@ def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
     with PL.run_lock(state.settings):
         conn = db.connect(state.settings.paths.db)
         try:
-            updated = db.update_detail_fields(
-                conn, entry["listing_id"],
-                viewers_masked=entry.get("viewers_masked"),
-                favorites_cnt=entry.get("favorites_cnt"),
-                attributes=entry.get("attributes"), features=entry.get("features"),
-                snapshot_at=entry.get("snapshot_at"))
+            if entry.get("backfill"):
+                from .backfill import apply
+                updated = apply(conn, entry)
+            else:
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    # 回填前保留基线；所有后续修订和当前值在同一事务中写入。
+                    CC.record(conn, entry["listing_id"], "baseline", entry.get("snapshot_at"))
+                    updated = db.update_detail_fields(
+                        conn, entry["listing_id"],
+                        viewers_masked=entry.get("viewers_masked"),
+                        favorites_cnt=entry.get("favorites_cnt"),
+                        attributes=entry.get("attributes"), features=entry.get("features"),
+                        snapshot_at=entry.get("snapshot_at"))
+                    if updated:
+                        if entry.get("title"):
+                            conn.execute("UPDATE dim_listing SET title=? WHERE listing_id=?",
+                                         [entry["title"], entry["listing_id"]])
+                        entry["revision_id"] = CC.record(conn, entry["listing_id"], "detail", entry.get("snapshot_at"))
+                        entry["missing"] = CC.complete_retry_state(conn, entry["listing_id"])
+                        if entry.get("retry_token"):
+                            CC.finish_retry(conn, entry["listing_id"], entry["retry_token"],
+                                            "incomplete" if entry["missing"] else "complete")
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+            if entry.get("backfill") and updated:
+                entry["missing"] = (entry.get("backfill_result") or {}).get("missing", [])
             if updated:
                 from .analysis import sync_game_csv
                 game = conn.execute("SELECT game_id FROM dim_listing WHERE listing_id = ?",
                                     [entry["listing_id"]]).fetchone()
-                entry["analysis_sync"] = sync_game_csv(state.settings, conn, game_id=game[0])
+                try:
+                    entry["analysis_sync"] = sync_game_csv(state.settings, conn, game_id=game[0])
+                except Exception as exc:
+                    # 写入已经提交；导出查询或文件错误不能把它报告成入库失败。
+                    entry["analysis_sync"] = {"ok": False, "game_id": game[0],
+                        "error": str(exc)[:300], "message": "数据已入库，数据表同步失败，请重试同步"}
         finally:
             conn.close()
     if not updated and entry.get("snapshot_at") is None:
@@ -628,9 +699,28 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
     if task is None:                        # URL 不含 /buy/ 模式：按默认任务兜底
         task = state.default_task
 
+    ensure_collection(state)
+    parsed = P.parse_list_page(html, url=url, parser_version=state.settings.parser_version)
+    selected_ids = payload.get("selected_ids")
+    if "selected_ids" in payload and (not isinstance(selected_ids, list) or len(selected_ids) > 1000
+            or any(not isinstance(i, str) or not CC.ID_RE.fullmatch(i) for i in selected_ids)):
+        return 400, {"ok": False, "error": "invalid-selected-ids"}
+    if selected_ids is not None:
+        wanted = set(selected_ids)
+        found = {c.listing_id for c in parsed.cards if c.listing_id}
+        if not wanted <= found:
+            return 400, {"ok": False, "error": "selected-id-not-in-dom"}
+        parsed.cards = [c for c in parsed.cards if c.listing_id in wanted]
+        parsed.cards_seen = len(parsed.cards)
+        parsed.cards_parsed = sum(c.parse_ok for c in parsed.cards)
+    observations = {c.listing_id: c for c in CC.parse_candidates(html, url).cards if c.listing_id}
+
     now = _dt.datetime.now()
     page_no = _safe_int(payload.get("page_no"), default=1, lo=1, hi=50)
     sweep = _safe_sweep(payload.get("sweep"))
+    dedupe_counts = payload.get("dedupe_counts") if isinstance(payload.get("dedupe_counts"), dict) else {}
+    skipped_before_upload = _safe_int(dedupe_counts.get("skip"), default=0, lo=0, hi=100000)
+    manual_before_upload = _safe_int(dedupe_counts.get("manual"), default=0, lo=0, hi=100000)
     run_id = new_run_id(f"{task.task_id}-plugin", now=now)
     raw_dir = raw_dir_for(state.settings, task.task_id, run_id, now=now)
     meta = {"url": url, "page_type": "list", "page_no": page_no, "task_id": task.task_id,
@@ -675,9 +765,7 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
             safe_collection["interval_ms"] = _safe_int(collection["interval_ms"], default=3000, lo=2000, hi=15000)
         meta["title_collection"] = safe_collection
         meta["note"] = "前端 B：复用列表响应，按商品编号串行获取公开完整标题；不触发悬浮、不导航详情"
-    dump = _write_raw(raw_dir, f"list_p{page_no:02d}", html=html, meta=meta)
-
-    parsed = P.parse_list_page(html, url=url, parser_version=state.settings.parser_version)
+    dump = None
     page_res = ListPageResult(page_no=1, url=url, status=None, ok=True,
                               cards_seen=parsed.cards_seen, cards_parsed=parsed.cards_parsed,
                               parse_success_rate=parsed.parse_success_rate,
@@ -690,6 +778,7 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                                 started_at=now, finished_at=now)
     # 词表按游戏画像取（未建画像的游戏返回空表：不用别的游戏的词表顶替，docs/02 §G）
     listings = PL.build_listings(list_result, X.seed_keywords(game_id=task.game_id))
+    listings = list({row.listing_id: row for row in listings}.values())
     merged_details = 0
     for row in listings:                     # 详情字段先到的情况：挂载后随批次一起入库
         detail = state.pending_details.pop(row.listing_id, None)
@@ -705,10 +794,46 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
         with PL.run_lock(state.settings):    # 与 crawl 互斥（DuckDB 单写者）
             conn = db.connect(state.settings.paths.db)
             try:
-                load_stats = PL.load_round(conn, state.settings, task, round_ts=round_ts,
-                                           listings=listings, collected_via="login",
-                                           infer_delist=False,
-                                           delist_skip_reason="plugin-channel-coverage-unknown")
+                decisions = [CC.decision(conn, observations.get(r.listing_id, r.card), game_id=task.game_id) for r in listings]
+                kinds = {d["id"]: d["kind"] for d in decisions}
+                accepted = [r for r in listings if kinds[r.listing_id] in ("new", "changed")]
+                conn.execute("BEGIN TRANSACTION")
+                try:
+                    if accepted:
+                        dump = _write_raw(raw_dir, f"list_p{page_no:02d}", html=html, meta=meta)
+                        page_res.raw = dump
+                    for row in accepted:
+                        CC.preserve(conn, row)
+                    load_stats = PL.load_round(conn, state.settings, task, round_ts=round_ts,
+                                               listings=accepted, collected_via="login",
+                                               infer_delist=False, commit=False, sync_csv=False,
+                                               preserve_same_round=False, compare_latest_prices=True, now=now,
+                                               delist_skip_reason="plugin-channel-coverage-unknown")
+                    for row in accepted:
+                        CC.record(conn, row.listing_id, "list", round_ts)
+                        CC.complete_retry_state(conn, row.listing_id)
+                    for d in decisions:
+                        # 基线只有真正写入或旧库首次观察才推进；重试不得擦除变更信号。
+                        if d["kind"] in ("new", "changed", "skip", "manual"):
+                            CC.save_baseline(conn, d["id"], d["baseline"])
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+                from .analysis import sync_game_csv, csv_sync_status
+                previous_sync = csv_sync_status(state.settings).get(str(task.game_id))
+                if accepted or previous_sync and not previous_sync.get("ok"):
+                    try:
+                        load_stats.analysis_sync = sync_game_csv(state.settings, conn, game_id=task.game_id)
+                    except Exception as exc:
+                        load_stats.analysis_sync = {"ok": False, "game_id": task.game_id, "error": str(exc)[:300]}
+                for d in decisions:
+                    d["snapshot_round"] = (round_ts.isoformat(timespec="seconds") if d["kind"] in ("new", "changed")
+                                           else d["snapshot_round"])
+                    d.pop("baseline", None)
+                    if d["kind"] in ("new", "changed"):
+                        d["missing"] = CC.complete_retry_state(conn, d["id"])
+                listings = accepted
             finally:
                 conn.close()
     except PL.PipelineError as exc:
@@ -720,7 +845,8 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                                detail_fetched=merged_details, risk_trigger=None,
                                raw_dir=str(raw_dir), duration_s=0.0, listings=listings)
     try:
-        PL.write_summary(Path(raw_dir) / "summary.json", summary)
+        if listings:
+            PL.write_summary(Path(raw_dir) / "summary.json", summary)
     except OSError:
         pass
     state.note(cards_seen=state.stats["cards_seen"] + parsed.cards_seen,
@@ -734,6 +860,10 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                        cards_seen=parsed.cards_seen,
                        cards_parsed=parsed.cards_parsed,
                        snapshots=load_stats.snapshots_inserted,
+                       updated=sum(d["kind"] == "changed" for d in decisions),
+                       duplicates=skipped_before_upload + sum(d["kind"] == "skip" for d in decisions),
+                       retry_pending=sum(d["kind"] == "retry" for d in decisions),
+                       manual_pending=manual_before_upload + sum(d["kind"] == "manual" for d in decisions),
                        new_listings=load_stats.new_listings,
                        parse_success_rate=round(parsed.parse_success_rate, 4),
                        extract_hit_rate=summary["extract_hit_rate"])
@@ -744,6 +874,11 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                  "parse_success_rate": round(parsed.parse_success_rate, 4),
                  "snapshots_inserted": load_stats.snapshots_inserted,
                  "new_listings": load_stats.new_listings,
+                 "items": decisions,
+                 "accepted_ids": [d["id"] for d in decisions if d["kind"] in ("new", "changed")],
+                 "updated_ids": [d["id"] for d in decisions if d["kind"] == "changed"],
+                 "skipped_ids": [d["id"] for d in decisions if d["kind"] in ("skip", "manual")],
+                 "retry_ids": [d["id"] for d in decisions if d["kind"] == "retry"],
                  "extract_hit_rate": summary["extract_hit_rate"],
                  "analysis_sync": load_stats.analysis_sync,
                  "field_diagnostics": PL.aggregate_field_diagnostics(list_result)}
@@ -760,11 +895,84 @@ def handle_ingest(state: GatewayState, path: str, body: bytes) -> tuple[int, dic
     if not isinstance(payload, dict):
         return 400, {"ok": False, "error": "body-must-be-object"}
     with state.lock:
+        if path in ("/collection/check", "/collection/retry"):
+            return handle_collection(state, path, payload)
         if path == "/ingest/cards":
             return _ingest_cards(state, payload)
         if path == "/ingest/detail":
             return _ingest_detail(state, payload)
     return 404, {"ok": False, "error": f"unknown-path: {path}"}
+
+
+def ensure_collection(state: GatewayState) -> None:
+    path = str(state.settings.paths.db)
+    if state.collection_db != path:
+        with PL.run_lock(state.settings):
+            CC.upgrade(state.settings)
+        state.collection_db = path
+
+
+def handle_collection(state: GatewayState, path: str, payload: dict) -> tuple[int, dict]:
+    try:
+        ensure_collection(state)
+        if path == "/collection/retry":
+            listing_id, token = payload.get("id"), payload.get("token")
+            if not isinstance(listing_id, str) or not CC.ID_RE.fullmatch(listing_id) \
+                    or not isinstance(token, str) or not re.fullmatch(r"[\w:.-]{1,160}", token):
+                raise ValueError("invalid-retry-identity")
+            action = payload.get("action")
+            if action not in ("claim", "failed", "incomplete", "cancelled"):
+                raise ValueError("invalid-retry-action")
+            with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+                old = CC.current_data(conn, listing_id)
+                if not old or state.match_task(old["game_id"]) is None:
+                    raise ValueError("target-not-selected")
+                if action == "claim":
+                    supplied = payload.get("snapshot_round")
+                    if supplied != old["snapshot_at"].isoformat(timespec="seconds"):
+                        return 409, {"ok": False, "error": "latest-snapshot-changed"}
+                    if not CC.complete_retry_state(conn, listing_id):
+                        return 200, {"ok": True, "claimed": False, "reason": "already-complete"}
+                    claimed = CC.claim_retry(conn, listing_id, token, old["snapshot_at"])
+                    return 200, {"ok": True, "claimed": claimed}
+                CC.finish_retry(conn, listing_id, token, action)
+                return 200, {"ok": True}
+        html, url = payload.get("html"), payload.get("url")
+        if not isinstance(html, str) or not html.strip() or not isinstance(url, str):
+            raise ValueError("invalid-candidates")
+        parts = urlsplit(url)
+        match = re.fullmatch(r"/buy/(\d+)/(\d+)/?", parts.path)
+        if parts.scheme != "https" or parts.netloc != "www.pxb7.com" or not match:
+            raise ValueError("invalid-source-url")
+        task = state.match_task(int(match[1]), int(match[2]))
+        if task is None:
+            return _target_not_selected(state, int(match[1]))
+        if _reject_risk_page(html):
+            return 422, {"ok": False, "error": "risk-page"}
+        parsed = CC.parse_candidates(html, url)
+        decisions = []
+        seen = set()
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            for card in parsed.cards:
+                if not card.parse_ok or not card.listing_id or card.listing_id in seen:
+                    continue
+                seen.add(card.listing_id)
+                if not CC.ID_RE.fullmatch(card.listing_id):
+                    continue
+                result = CC.decision(conn, card, game_id=task.game_id)
+                decisions.append({k: v for k, v in result.items() if k != "baseline"})
+                # 旧库首次遇见只建立列表来源基线，不虚构旧标题。
+                if result["kind"] != "new" and not conn.execute(
+                        "SELECT list_baseline FROM collection_listing_state WHERE listing_id=?",
+                        [card.listing_id]).fetchone():
+                    CC.save_baseline(conn, card.listing_id, result["baseline"])
+        counts = {kind: sum(d["kind"] == kind for d in decisions)
+                  for kind in ("new", "changed", "retry", "skip", "manual")}
+        return 200, {"ok": True, "items": decisions, "counts": counts}
+    except (ValueError, TypeError) as exc:
+        return 400, {"ok": False, "error": str(exc)}
+    except PL.PipelineError as exc:
+        return 409, {"ok": False, "error": f"busy: {exc}"}
 
 
 # --------------------------------------------------------------------------- #
@@ -847,6 +1055,7 @@ _GAME_COLUMNS: dict[int, tuple[tuple[str, str, str], ...]] = {
         ("five_star_weapon_refined", "武器精炼（精N）", "feat:five_star_weapon_refined"),
         ("resources", "资源", "feat:wuwa_resources"),
         ("paid_items", "额外付费商品", "feat:wuwa_paid_items"),
+        ("map_exploration", "地图探索度", "feat:wuwa_map_exploration"),
         ("server", "区服", "col:server"),
         ("mail_status", "邮箱", "col:mail_status"),
     ),
@@ -928,6 +1137,9 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
             return str(value[0]) if value else default
         return str(value if value is not None else default)
 
+    with state.lock:
+        ensure_collection(state)
+    history_mode = single("mode", "rounds") == "history"
     offset = _safe_int(single("offset", "0"), default=0, lo=0, hi=10_000_000)
     limit = _safe_int(single("limit", str(LISTINGS_PAGE_DEFAULT)),
                       default=LISTINGS_PAGE_DEFAULT, lo=10, hi=LISTINGS_PAGE_MAX)
@@ -942,11 +1154,14 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
     if game_id is not None:
         where, params = " WHERE l.game_id = ?", [game_id]
 
-    base = (" FROM fct_listing_snapshot s"
+    snapshot_source = ("(SELECT * FROM fct_listing_snapshot QUALIFY row_number() OVER"
+                       " (PARTITION BY listing_id ORDER BY snapshot_at DESC)=1)" if history_mode
+                       else "fct_listing_snapshot")
+    base = (f" FROM {snapshot_source} s"
             " JOIN dim_listing l ON l.listing_id = s.listing_id"
             " LEFT JOIN dim_game g ON g.game_id = l.game_id")
 
-    payload: dict[str, Any] = {"ok": True, "offset": offset, "limit": limit,
+    payload: dict[str, Any] = {"ok": True, "offset": offset, "limit": limit, "mode": "history" if history_mode else "rounds",
                                "game_id": game_id, "columns": _columns_payload(columns)}
     try:
         conn = db.connect(state.settings.paths.db, read_only=True)
@@ -970,6 +1185,14 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
                 f"{select_cols.rstrip(',')}{base}{where}"
                 " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT ? OFFSET ?",
                 [*params, limit, offset]).fetchall()
+            revisions = {}
+            if history_mode:
+                for listing_id in {row[0] for row in rows}:
+                    r = conn.execute("SELECT version,captured_at,diff_json FROM fct_listing_revision"
+                                     " WHERE listing_id=? ORDER BY version DESC LIMIT 1", [listing_id]).fetchone()
+                    revisions[listing_id] = {"versions": r[0] if r else 0,
+                                            "changed_at": r[1].isoformat() if r else None,
+                                            "latest_diff": json.loads(r[2]) if r else []}
         finally:
             conn.close()
     except Exception as exc:                  # 库不可用不拖垮看板
@@ -986,6 +1209,9 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
         for key, _label, source in columns:
             kind, name = source.split(":", 1)
             value = col_values.get(name) if kind == "col" else features.get(name)
+            if name == "wuwa_map_exploration" and value:
+                from .exploration import estimate
+                value = estimate(value)
             if name == "wuwa_resources":
                 resources = [{"name": label, "value": features.get(feature)}
                              for feature, label in WUWA_RESOURCES]
@@ -1013,6 +1239,8 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
             "game_id": int(gid) if gid is not None else None,
             "game_name": gname or (str(gid) if gid is not None else "—"),
             "cells": cells,
+            "weapon_information": W.status(cells.get("five_star_weapons"), features),
+            **revisions.get(listing_id, {}),
         })
     payload.update({"total": total, "games": games, "rows": out_rows})
     return payload
@@ -1165,6 +1393,7 @@ def _group_keywords_by_game(rows: Sequence[Any], *, per_game_limit: int = 10
 
 def build_stats_payload(state: GatewayState) -> dict[str, Any]:
     """看板 /stats 聚合：网关实时状态 + 插件配置 + DB 聚合 + 风控状态（只读，全离线）。"""
+    from .analysis import csv_sync_status
     with state.lock:
         stats = dict(state.stats)
         recent = list(state.recent_batches)
@@ -1248,6 +1477,7 @@ def build_stats_payload(state: GatewayState) -> dict[str, Any]:
         "paths": paths_payload(state),
         "script": script_info(state),
         "pending_details": pending,
+        "csv_sync_status": csv_sync_status(state.settings),
         "risk": _risk_summary(state.settings),
         "db": db_payload,
     }
@@ -1326,6 +1556,33 @@ class GatewayHandler(BaseHTTPRequestHandler):
         elif path == "/listings":
             query = parse_qs(urlsplit(self.path).query)
             self._send(200, handle_listings(self.state, query))
+        elif path == "/listings/history":
+            if not origin_allowed(self._origin()):
+                self._send(403, {"ok": False, "error": "origin-not-allowed"})
+                return
+            query = parse_qs(urlsplit(self.path).query)
+            try:
+                with self.state.lock:
+                    ensure_collection(self.state)
+                    with PL.run_lock(self.state.settings), db.connect(self.state.settings.paths.db, read_only=True) as conn:
+                        data = CC.history(conn, (query.get("id") or [""])[0],
+                                          (query.get("offset") or [0])[0], (query.get("limit") or [15])[0])
+                self._send(200, data)
+            except (ValueError, TypeError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:300]})
+        elif path == "/backfill/candidates":
+            from .backfill import candidates
+            try:
+                self._send(200, candidates(self.state, parse_qs(urlsplit(self.path).query)))
+            except (ValueError, TypeError):
+                self._send(400, {"ok": False, "error": "invalid-query"})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:300]})
+        elif path == "/backfill/job":
+            from .backfill import job_status
+            self._send(200, job_status(self.state))
         elif path == "/status":
             self._send(200, handle_status(self.state))
         else:
@@ -1349,6 +1606,30 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
+        if path in ("/backfill/prepare", "/backfill/sync", "/backfill/delete",
+                    "/backfill/enqueue", "/backfill/job/claim", "/backfill/job/finish",
+                    "/backfill/result"):
+            if not origin_allowed_local(self._origin()):
+                self._send(403, {"ok": False, "error": "origin-not-allowed"})
+                return
+            raw, err = self._read_json_body(1024 * 1024)
+            if err is not None:
+                return
+            from . import backfill
+            try:
+                if not isinstance(raw, dict):
+                    raise ValueError("invalid-payload")
+                handler = {"/backfill/prepare": backfill.prepare, "/backfill/sync": backfill.sync,
+                           "/backfill/delete": backfill.delete, "/backfill/enqueue": backfill.enqueue,
+                           "/backfill/job/claim": backfill.claim_job,
+                           "/backfill/job/finish": backfill.finish_job,
+                           "/backfill/result": backfill.report_result}[path]
+                self._send(200, handler(self.state, raw))
+            except (ValueError, TypeError, KeyError) as exc:
+                self._send(400, {"ok": False, "error": str(exc)[:300]})
+            except Exception as exc:
+                self._send(500, {"ok": False, "error": str(exc)[:300]})
+            return
         if path == "/shutdown":
             # 优雅停止（仅回环可达；由 run.py stop-gateway / 看板按钮触发）
             self._send(200, {"ok": True, "note": "网关正在停止"})
@@ -1374,7 +1655,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._send(*handle_config_post(self.state, raw))
             return
-        if path not in ("/ingest/cards", "/ingest/detail"):
+        if path not in ("/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry"):
             self._send(404, {"ok": False, "error": "unknown-path"})
             return
         origin = self._origin()

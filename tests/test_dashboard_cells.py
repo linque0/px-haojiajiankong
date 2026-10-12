@@ -16,7 +16,17 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const source=fs.readFileSync(process.argv[1],'utf8');
 const start=source.indexOf('const cellText ='),end=source.indexOf('function fillGameSelects',start);
 const sandbox={expandedCells:new Set(),fmt:String,esc:String};
-vm.runInNewContext(source.slice(start,end)+';this.render=cellText',sandbox);
+vm.runInNewContext(source.slice(start,end)+';this.render=cellText;this.weapon=weaponCell',sandbox);
+const none={listing_id:'123456',cells:{five_star_weapons:0}};
+assert.equal(sandbox.weapon(none,'five_star_weapons'),'0（已确认无）');
+assert.equal(sandbox.weapon(none,'five_star_weapon_refined'),'不适用（无五星武器）');
+const unreported={listing_id:'123456',cells:{five_star_weapons:null},weapon_information:{state:'unreported',reason:'详情未公示'}};
+for(const key of ['five_star_weapons','five_star_weapon_refined']) {
+  assert.ok(sandbox.weapon(unreported,key).includes('已采集·页面未提供'));
+  assert.ok(!sandbox.weapon(unreported,key).includes('打开详情补齐'));
+  assert.ok(sandbox.weapon({listing_id:'123456',cells:{}},key).includes('未采到／解析失败'));
+}
+assert.equal(sandbox.weapon({cells:{five_star_weapons:2,five_star_weapon_refined:[{name:'音曦',value:1}]}},'five_star_weapon_refined'),null);
 for(const length of [29,30,31]){
   for(const char of ['字','😀']) {
     assert.equal(sandbox.render(char.repeat(length),'text','a').includes('<details'),length>30);
@@ -31,6 +41,16 @@ assert.ok(!html.includes('undefined命'));
 sandbox.expandedCells.add('a');
 assert.ok(sandbox.render('字'.repeat(31),'text','a').includes(' open'));
 assert.ok(!sandbox.render('字'.repeat(30),'text','a').includes('<details'));
+const maps={maps:[{name:'云陵谷',progress:0,total:{astrite:2000},remaining:{astrite:2000}}],partial:true,observed_maps:1,estimated_maps:1,expected_maps:51,remaining:{astrite:2000},coverage:{astrite:1/51},remaining_astrite_pulls:12.5};
+const mapHtml=sandbox.render(maps,'map_exploration','map');
+assert.ok(mapHtml.includes('<details') && !mapHtml.includes(' open'));
+assert.ok(mapHtml.includes('0%') && mapHtml.includes('约2000') && mapHtml.includes('12.5'));
+assert.ok(mapHtml.includes('部分地图估算') && !mapHtml.includes('未知') && !mapHtml.includes('波纹'));
+const unknownMaps={maps:[{name:'未登记',progress:null,total:{astrite:null},remaining:{astrite:null}}],partial:true,observed_maps:0,estimated_maps:0,expected_maps:51,remaining:{astrite:null},coverage:{astrite:0},remaining_astrite_pulls:null};
+const unknownHtml=sandbox.render(unknownMaps,'map_exploration','map3');
+assert.ok(unknownHtml.includes('未知') && unknownHtml.includes('星声'));
+sandbox.expandedCells.add('map');
+assert.ok(sandbox.render(maps,'map_exploration','map').includes(' open'));
 '''
     result = subprocess.run([node, '-e', script, str(path)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr

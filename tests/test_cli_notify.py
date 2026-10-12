@@ -33,9 +33,18 @@ LIST_HTML = """<html><body><ul class='product-list'>
 
 
 @pytest.fixture()
-def settings(tmp_path: Path) -> cfg.Settings:
+def settings(tmp_path: Path, monkeypatch) -> cfg.Settings:
     base = cfg.load_settings()
-    return dataclasses.replace(base, paths=dataclasses.replace(
+    # CLI 会重新加载设置，不能只隔离传入夹具的 project_root。
+    original_load = cfg.load_settings
+    def isolated_load(path=None):
+        loaded = original_load(path)
+        return dataclasses.replace(loaded, project_root=tmp_path, paths=dataclasses.replace(
+            loaded.paths, state_dir=tmp_path / "state", risk_state=tmp_path / "risk.json",
+            runs=tmp_path / "runs", log_dir=tmp_path / "logs"))
+    monkeypatch.setattr(cfg, "load_settings", isolated_load)
+    monkeypatch.setattr(cli, "load_settings", isolated_load)
+    return dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "cli.duckdb", raw_root=tmp_path / "raw",
         state_dir=tmp_path / "state", runs=tmp_path / "runs",
         risk_state=tmp_path / "risk.json"))
@@ -97,6 +106,8 @@ def test_cli_parse_raw_replays_offline(settings, tmp_path, capsys) -> None:
     assert summary["snapshots_inserted"] == 1 and summary["cards_parsed"] == 1
     assert summary["delist_events"] == 0, "重放默认不推断下架"
     assert summary["risk_trigger"] is None
+    sync_status = json.loads((settings.paths.state_dir / "csv-sync-status.json").read_text(encoding="utf-8"))
+    assert Path(sync_status["10026"]["path"]).is_relative_to(tmp_path)
 
     conn = db.connect(settings.paths.db, read_only=True)
     try:

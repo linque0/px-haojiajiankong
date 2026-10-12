@@ -132,6 +132,7 @@ async function saveTargets() {
   });
   if (res.ok && res.data && res.data.ok) {
     renderTargets(res.data.targets || {});
+    bfOffset = 0; bfSelection.clear(); await refreshBackfill();
     note(ids.length ? `采集目标已保存（${ids.length} 个）✓` : "已清空目标 → 使用默认任务 ✓");
   } else {
     note("目标保存失败：" + errorText(res, "未知错误"), true);
@@ -189,23 +190,40 @@ function modeHelp() {
 });
 function renderProgress(p) {
   if (!p) return;
-  const labels = {running:"进行中", done:"已完成", partial:"部分完成", error:"失败", cancelled:"已取消", paused:"已暂停"};
-  const busy = p.status === "running";
-  $("progress-mode").textContent = (p.mode === "detail" ? "详情页采集" : "列表采集") + " · " + (labels[p.status] || p.status);
-  $("progress-count").textContent = `${p.processed}/${p.requested} 张`;
-  $("collect-progress").value = Math.min(100, Math.round(p.processed / Math.max(1, p.requested) * 100));
+  const labels = {running:"进行中", waiting_verification:"等待网站验证", done:"已完成", partial:"部分完成", error:"失败", cancelled:"已取消", paused:"已暂停"};
+  const busy = ["running", "waiting_verification"].includes(p.status);
+  $("resume-verification").hidden = p.status !== "waiting_verification";
+  $("progress-mode").textContent = (p.mode === "backfill" ? "信息补录" : p.mode === "detail" ? "详情页采集" : "列表采集") + " · " + (labels[p.status] || p.status);
+  const completed = p.mode === "backfill" ? p.processed : p.new_succeeded ?? p.processed;
+  $("progress-count").textContent = `${completed}/${p.requested} ${p.mode === "backfill" ? "张" : "个新账号"}`;
+  $("collect-progress").value = Math.min(100, Math.round(completed / Math.max(1, p.requested) * 100));
   $("progress-phase").textContent = p.phase;
   const seconds = Math.max(0, Math.round(((busy ? Date.now() : p.updatedAt) - p.startedAt) / 1000));
   $("progress-detail").textContent = `入库 ${p.succeeded} · 失败 ${p.failed} · ${seconds} 秒`
     + (p.incomplete ? ` · 待补齐 ${p.incomplete}` : "");
+  if (p.mode !== "backfill") $("progress-detail").textContent +=
+    ` · 更新 ${p.updated || 0} · 重复跳过 ${p.duplicates || 0} · 自动重试 ${p.retried || 0} · 待补录 ${p.manual_pending || 0}`;
   $("cancel-collect").disabled = !busy;
-  $("grab").disabled = busy;
+  $("grab").disabled = busy || bfStarting;
+  bfBusy = busy;
+  updateBackfillButtons();
+  if (p.mode === "backfill" && p.updatedAt !== bfProgressAt) {
+    bfProgressAt = p.updatedAt;
+    if (!busy) $("bf-note").textContent = p.phase;
+    refreshBackfill();
+  }
 }
 function refreshProgress() {
   chrome.runtime.sendMessage({type:"collection-status"}, reply => {
     if (!chrome.runtime.lastError && reply?.ok) renderProgress(reply.progress);
   });
 }
+$("resume-verification").addEventListener("click", () => {
+  chrome.runtime.sendMessage({type:"verification-confirm"}, reply => {
+    note(reply?.ok ? "已确认，页面恢复后继续原任务" : errorText(reply, "页面仍未完成验证"), !reply?.ok);
+    refreshProgress();
+  });
+});
 $("cancel-collect").addEventListener("click", () => {
   chrome.runtime.sendMessage({type:"collection-cancel"}, reply => {
     if (reply?.ok) {note("采集已取消，已入库数据保留"); refreshProgress();}
@@ -337,6 +355,224 @@ $("upd-ext").addEventListener("click", () => {
   });
 });
 
+// ---------- 最新快照查缺 / 补录 ----------
+let bfOffset = 0, bfTotal = 0, bfBusy = false, bfStarting = false, bfProgressAt = null;
+let bfRows = [], bfResults = {}, bfPending = {}, bfLoading = false, bfDirty = false, bfAllLoading = false;
+const bfSelection = new Map();
+const reasonText = reasons => (reasons || []).map(r => `${r.label}：${r.reason}`).join("；");
+const bfError = error => ({"target-not-selected":"请先勾选对应游戏的采集目标",
+  "selection-changed-refresh-list":"缺失清单已变化，请刷新后重新勾选",
+  "latest-snapshot-changed":"已出现新快照，旧目标已跳过，请刷新清单",
+  "delete-selection-limit":"每次请选择 1～200 个商品删除",
+  "delete-confirmation-required":"请确认删除全部轮次",
+  "delisted":"商品已下架，无法补录",
+  "no-candidates":"当前范围已无待补录记录"})[error] || error;
+async function extensionRequest(message) {
+  try { return await chrome.runtime.sendMessage(message); }
+  catch (error) { return {ok:false, err:error.message}; }
+}
+function updateBackfillButtons() {
+  const collectable = Array.from(bfSelection.values()).some(row => row.collectable);
+  $("bf-selected").textContent = `补录选中（${bfSelection.size}）`;
+  $("bf-selected").disabled = bfBusy || bfStarting || !collectable;
+  $("bf-all").textContent = bfSelection.size ? "取消全选" : "全选";
+  $("bf-all").disabled = bfBusy || bfStarting || bfAllLoading;
+  $("bf-delete").textContent = `删除选中（${bfSelection.size}）`;
+  $("bf-delete").disabled = bfBusy || bfStarting || !bfSelection.size || bfSelection.size > 200;
+  $("bf-check-failed").disabled = bfBusy || bfStarting;
+}
+function renderBackfillRows() {
+  $("bf-list").innerHTML = bfRows.map(row => {
+    const saved = bfResults[row.id];
+    // 弹窗本地记录优先，其次网关台账（跨设备/重装后仍能看到最近补录状态）。
+    const result = saved?.snapshot_round === row.snapshot_round ? saved
+      : (row.last_backfill?.snapshot_round === row.snapshot_round ? row.last_backfill : null);
+    const latest = result ? `最近补录：${({complete:"已补齐", incomplete:"仍有缺项", failed:"失败"})[result.status] || result.status}`
+      + (result.error ? `（${bfError(result.error)}）` : "")
+      + ` · ${new Date(result.at).toLocaleString("zh-CN")}` : "尚无补录记录";
+    return `<label class="bf-item"><input type="checkbox" data-bf-id="${esc(row.id)}"`
+      + `${bfSelection.has(row.id) ? " checked" : ""}>`
+      + `<div><a href="https://www.pxb7.com/product/${encodeURIComponent(row.id)}/1" target="_blank" rel="noreferrer">${esc(row.id)}</a>`
+      + ` · ${esc(row.game_name)}<div class="muted">${esc(row.snapshot_round)}</div>`
+      + `<div>${esc(reasonText(row.missing))}</div><div class="muted">${esc(latest)}${row.collectable ? "" : "；请先勾选该游戏采集目标"}</div></div></label>`;
+  }).join("") || '<div class="muted">该范围暂无缺失记录</div>';
+  $("bf-list").querySelectorAll("input[data-bf-id]").forEach(input => input.addEventListener("change", () => {
+    const row = bfRows.find(r => r.id === input.dataset.bfId);
+    if (input.checked) bfSelection.set(row.id, {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+    else bfSelection.delete(row.id);
+    updateBackfillButtons();
+  }));
+  updateBackfillButtons();
+}
+async function refreshBackfillState() {
+  const response = await extensionRequest({type:"backfill-state"});
+  if (!response?.ok) return;
+  bfResults = response.results || {}; bfPending = response.pending || {};
+  const pending = Object.values(bfPending);
+  $("bf-sync-retry").hidden = !pending.length;
+  $("bf-sync").textContent = pending.length
+    ? "数据表待同步：" + pending.map(r => `${r.game_id} · ${r.message || r.error}`
+      + (r.path ? ` · ${r.path}` : "")).join("；")
+    : "数据表同步：无待重试项";
+}
+async function refreshBackfill(force = false) {
+  if (bfLoading) {
+    if (force) bfDirty = true;   // 在飞查询结束后补跑一次：删除/启动后的强刷不被重入锁吞掉
+    return;
+  }
+  bfLoading = true;
+  const game = $("bf-game").value;
+  try {
+    const response = await extensionRequest({type:"backfill-query", game_id:game, offset:bfOffset});
+    if (!(response?.ok && response.data?.ok)) {
+      $("bf-list").textContent = "查询失败：" + errorText(response, "无响应");
+      bfRows = []; bfTotal = 0; bfSelection.clear(); updateBackfillButtons(); return;
+    }
+    if (game !== $("bf-game").value) return;
+    const data = response.data;
+    bfTotal = data.total;
+    if (bfOffset >= bfTotal && bfOffset > 0) {
+      bfOffset = Math.max(0, Math.floor((bfTotal - 1) / 10) * 10);
+      bfLoading = false; return refreshBackfill();
+    }
+    bfRows = data.rows;
+    for (const row of bfRows) {
+      if (bfSelection.has(row.id)) {
+        if (bfSelection.get(row.id).snapshot_round !== row.snapshot_round) bfSelection.delete(row.id);
+        else bfSelection.get(row.id).collectable = row.collectable;
+      }
+    }
+    // 本次已补齐的选项无需再次提交；其他页选择仍保留。
+    for (const [id] of bfSelection) {
+      if (bfResults[id]?.status === "complete" && bfResults[id].snapshot_round === bfSelection.get(id).snapshot_round) bfSelection.delete(id);
+    }
+    $("bf-game").innerHTML = '<option value="selected">已勾选游戏</option><option value="all">全部游戏</option>'
+      + data.games.map(g => `<option value="${esc(g.game_id)}">${esc(g.game_name)}（缺 ${g.missing}）</option>`).join("");
+    $("bf-game").value = game;
+    const coverage = game === "all" || game === "selected" ? "按游戏检查关键字段和角色／武器明细" : (data.coverage[game] || []).join("、");
+    $("bf-coverage").textContent = "检测范围：" + coverage + "；鸣潮检查必填列；额外付费商品允许为空，不计缺失";
+    $("bf-total").textContent = `${bfTotal} 条待补录`;
+    $("bf-page").textContent = bfTotal ? `${Math.floor(bfOffset / 10) + 1}/${Math.ceil(bfTotal / 10)} 页` : "0 页";
+    $("bf-prev").disabled = bfOffset === 0; $("bf-next").disabled = bfOffset + 10 >= bfTotal;
+    await refreshBackfillState(); renderBackfillRows();
+  } finally {
+    bfLoading = false;
+    if (game !== $("bf-game").value) { bfDirty = false; refreshBackfill(true); }
+    else if (bfDirty) { bfDirty = false; refreshBackfill(true); }
+  }
+}
+async function startBackfillSelected() {
+  const items = Array.from(bfSelection.values());
+  const ready = items.filter(item => item.collectable);
+  const skipped = items.length - ready.length;
+  if (!ready.length) {
+    $("bf-note").textContent = "选中记录均未启用对应游戏采集目标；请先在「采集目标」勾选后再补录";
+    return;
+  }
+  bfStarting = true; updateBackfillButtons();
+  $("bf-note").textContent = "正在校验清单并备份数据库…";
+  try {
+    if (settingsDirty && !(await saveSettings())) return;
+    const response = await extensionRequest({type:"backfill-start", options:{game_id:$("bf-game").value, items:ready}});
+    if (response?.ok && response.progress) {
+      $("bf-note").textContent = `补录已启动，可关闭弹窗${skipped ? `；已跳过 ${skipped} 条未启用游戏记录` : ""}。备份：${response.progress.backup || "已完成"}`;
+      bfSelection.clear();
+    } else {
+      const err = errorText(response, "未知错误");
+      $("bf-note").textContent = "补录未启动：" + bfError(err);
+      if (err === "selection-changed-refresh-list") {
+        bfSelection.clear();
+        $("bf-note").textContent = "清单已变化，未启动补录；已刷新清单，请重新勾选";
+      }
+    }
+    refreshProgress(); await refreshBackfill(true);
+  } finally { bfStarting = false; updateBackfillButtons(); }
+}
+
+// 全选/取消全选（2026-10-06 用户指令，替代原「补录全部」）：全选拉取当前筛选
+// 范围的全部页并入跨页选择；再次点击清空全部选择。
+async function toggleSelectAll() {
+  if (bfSelection.size) { bfSelection.clear(); renderBackfillRows(); return; }
+  if (bfBusy || bfStarting || bfAllLoading) return;
+  bfAllLoading = true; updateBackfillButtons();
+  const game = $("bf-game").value;
+  $("bf-note").textContent = "正在全选当前范围…";
+  try {
+    for (let offset = 0; offset < 2000; offset += 200) {
+      const response = await extensionRequest({type:"backfill-query", game_id:game, offset, limit:200});
+      if (!(response?.ok && response.data?.ok)) {
+        $("bf-note").textContent = "全选失败：" + errorText(response, "无响应");
+        return;
+      }
+      if (game !== $("bf-game").value) return;
+      const rows = response.data.rows || [];
+      for (const row of rows) {
+        if (!bfSelection.has(row.id)) bfSelection.set(row.id,
+          {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+      }
+      if (!rows.length || offset + 200 >= response.data.total) break;
+    }
+    $("bf-note").textContent = bfSelection.size
+      ? `已全选 ${bfSelection.size} 条；可翻页取消个别勾选，再点「补录选中」或「删除选中」`
+      : "当前范围没有可勾选的记录";
+  } finally {
+    bfAllLoading = false;
+    renderBackfillRows();
+  }
+}
+$("bf-game").addEventListener("change", () => {bfOffset = 0; bfSelection.clear(); refreshBackfill();});
+$("bf-refresh").addEventListener("click", () => refreshBackfill(true));
+$("bf-prev").addEventListener("click", () => {if (bfLoading) return; bfOffset = Math.max(0, bfOffset - 10); refreshBackfill();});
+$("bf-next").addEventListener("click", () => {if (bfLoading) return; bfOffset += 10; refreshBackfill();});
+$("bf-selected").addEventListener("click", () => startBackfillSelected());
+$("bf-all").addEventListener("click", () => toggleSelectAll());
+$("bf-check-failed").addEventListener("click", () => {
+  for (const row of bfRows) {
+    const result = bfResults[row.id];
+    if (result?.snapshot_round === row.snapshot_round && ["failed", "incomplete"].includes(result.status)) {
+      bfSelection.set(row.id, {id:row.id, snapshot_round:row.snapshot_round, collectable:row.collectable});
+    }
+  }
+  renderBackfillRows();
+});
+$("bf-delete").addEventListener("click", async () => {
+  const items = Array.from(bfSelection.values()).map(({id,snapshot_round}) => ({id,snapshot_round}));
+  if (bfBusy || bfStarting || !items.length || items.length > 200) return;
+  if (!window.confirm(`删除选中的 ${items.length} 个商品？\n将删除这些商品的全部入库轮次、价格变动、关键词及下架记录，并更新游戏 CSV。\n删除前自动备份；没有一键撤销，恢复备份会覆盖之后的数据库改动。\n商品编号：${items.map(item => item.id).join("、")}`)) return;
+  bfStarting = true; updateBackfillButtons(); $("grab").disabled = true;
+  $("bf-note").textContent = "正在校验缺失数据、备份并删除…";
+  try {
+    const response = await extensionRequest({type:"backfill-delete", options:{items,confirm_all_rounds:true}});
+    if (response?.data?.ok) {
+      const deleted = new Set(response.data.deleted_ids);
+      for (const id of deleted) bfSelection.delete(id);
+      // 立即从当前页移除已删行再强制刷新：删除效果即时可见，不等 10 秒定时器。
+      bfRows = bfRows.filter(row => !deleted.has(row.id));
+      renderBackfillRows();
+      const synced = (response.data.results || []).filter(result => result.ok).map(result => result.game_id);
+      const pending = (response.data.results || []).filter(result => !result.ok).map(result => result.game_id);
+      $("bf-note").textContent = `已删除 ${response.data.deleted} 个商品、${response.data.counts.fct_listing_snapshot} 条快照。`
+        + (synced.length ? `数据表已同步：${synced.join("、")}。` : "")
+        + (pending.length ? `数据表待同步：${pending.join("、")}，请点击重试同步。` : "")
+        + `备份：${response.data.backup}`;
+    } else {
+      const err = errorText(response, "无响应");
+      $("bf-note").textContent = "删除失败：" + bfError(err);
+      if (err === "selection-changed-refresh-list") {
+        bfSelection.clear();
+        $("bf-note").textContent = "选中记录已过期或已补齐，未删除任何数据；清单已刷新，请重新勾选";
+      }
+    }
+    await refreshBackfill(true); await refresh();
+  } finally {bfStarting = false; updateBackfillButtons(); $("grab").disabled = bfBusy;}
+});
+$("bf-sync-retry").addEventListener("click", async () => {
+  $("bf-sync-retry").disabled = true;
+  const response = await extensionRequest({type:"backfill-sync", game_ids:Object.keys(bfPending).map(Number)});
+  $("bf-note").textContent = response?.data?.ok ? "同步重试已结束，请查看数据表状态" : "同步失败：" + errorText(response, "无响应");
+  await refreshBackfillState(); $("bf-sync-retry").disabled = false;
+});
+
 // ---------- 启动 ----------
 checkExtUpdate();
 refresh();
@@ -344,3 +580,5 @@ setInterval(refresh, 3000);
 
 refreshProgress();
 setInterval(refreshProgress, 1000);
+refreshBackfill();
+setInterval(refreshBackfill, 10000);

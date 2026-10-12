@@ -66,3 +66,12 @@ button {
 button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 500; }
 button.accent { background: var(--green); }
 footer { color: var(--muted); font-size: 11px; margin-top: 10px; text-align: center; }
+.backfill {background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px;}
+.backfill .row {flex-wrap:wrap;}
+.backfill select {max-width:190px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:5px; padding:3px;}
+.bf-item {display:flex; align-items:flex-start; gap:6px; border-bottom:1px solid var(--line); padding:6px 0;}
+.bf-item input {margin-top:4px;}
+.bf-item div {min-width:0; overflow-wrap:anywhere;}
+.bf-item a {color:var(--blue);}
+#bf-note, #bf-sync {overflow-wrap:anywhere; margin-top:5px;}
+#bf-list {max-height:240px; overflow-y:auto;}

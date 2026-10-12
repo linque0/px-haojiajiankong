@@ -26,9 +26,13 @@ from tests.test_crawl_refusal import _tmp_settings_file  # noqa: E402
 
 
 @pytest.fixture()
-def settings(tmp_path: Path) -> cfg.Settings:
+def settings(tmp_path: Path, monkeypatch) -> cfg.Settings:
     base = cfg.load_settings()
-    return dataclasses.replace(base, paths=dataclasses.replace(
+    original_load = cfg.load_settings
+    isolated_load = lambda path=None: dataclasses.replace(original_load(path), project_root=tmp_path)
+    monkeypatch.setattr(cfg, "load_settings", isolated_load)
+    monkeypatch.setattr(cli, "load_settings", isolated_load)
+    return dataclasses.replace(base, project_root=tmp_path, paths=dataclasses.replace(
         base.paths, db=tmp_path / "qc.duckdb", raw_root=tmp_path / "raw",
         state_dir=tmp_path / "state", runs=tmp_path / "runs",
         risk_state=tmp_path / "state" / "risk.json"))
@@ -170,7 +174,9 @@ def test_qc_parse_rate_check_uses_summaries(settings: cfg.Settings) -> None:
     assert qc._check_parse_rate([{"cards_seen": 10, "cards_parsed": 9}]).status == qc.STATUS_PASS
 
 
-def test_cli_qc_exit_codes(settings, tmp_path, capsys) -> None:
+def test_cli_qc_exit_codes(settings, tmp_path, capsys, monkeypatch) -> None:
+    # 本机路径覆写不能把临时空库的验收与真实 raw 采集轮次混在一起。
+    monkeypatch.setattr(cfg, "PATHS_OVERRIDE_FILE", tmp_path / "no-local-overrides.json")
     settings_file = _tmp_settings_file(tmp_path)
     db.init_db(settings.paths.db)
     # 空库 → 快照断档判失败 → 退出码 22

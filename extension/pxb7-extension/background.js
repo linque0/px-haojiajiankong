@@ -13,14 +13,39 @@
 const GATEWAY = "http://127.0.0.1:8765";
 
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
-const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail"]);
+const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry"]);
 importScripts("collection.js");
 // 详情队列的间隔来自网关 /config（deps.getConfig）；列表模式不经此路径，两者互不共用。
 const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)),
   { getConfig: async () => {
       const res = await gfetch("/config");
       return (res && res.data && res.data.config) || {};
-    } });
+    }, retry: options => gfetch("/collection/retry", withJsonBody(options)),
+    prepareBackfill: options => gfetch("/backfill/prepare", withJsonBody(options)),
+    deleteBackfill: options => gfetch("/backfill/delete", withJsonBody(options)),
+    // 完整看板发起的补录中转：领取/回报 + 单项结果台账上报（尽力而为）。
+    claimBackfillJob: () => gfetch("/backfill/job/claim", withJsonBody({})),
+    finishBackfillJob: result => gfetch("/backfill/job/finish", withJsonBody(result)),
+    reportResult: payload => gfetch("/backfill/result", withJsonBody(payload)) });
+
+// 补录启动只接受本扩展 UI；站点内容脚本不能构造补录任务或触发数据库备份。
+function extensionPage(sender) {
+  return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("popup.html");
+}
+let syncWrites = Promise.resolve();
+async function rememberSync(data) {
+  const results = data?.results || (data?.analysis_sync ? [data.analysis_sync] : Object.values(data?.csv_sync_status || {}));
+  if (!results.length) return;
+  syncWrites = syncWrites.catch(() => {}).then(async () => {
+    const key = "pxb7-csv-sync", pending = (await chrome.storage.local.get(key))[key] || {};
+    for (const result of results) {
+      if (result.ok) delete pending[result.game_id];
+      else pending[result.game_id] = result;
+    }
+    await chrome.storage.local.set({[key]:pending});
+  });
+  await syncWrites;
+}
 
 // 自更新：解包扩展的「重新加载」按浏览器是手动操作（Chrome/Edge/夸克都忽略命令行里的
 // chrome:// 地址），但扩展可以重载自己——chrome.runtime.reload() 会按磁盘目录重新读取。
@@ -58,7 +83,7 @@ async function checkSelfUpdate(autoReload) {
   if (!latest || !isNewer(latest, OWN_VERSION)) return { ok: true, latest, update_available: false };
   chrome.action.setBadgeBackgroundColor({ color: "#f59e0b" });
   chrome.action.setBadgeText({ text: "↑" });
-  const running = (await collection.progress()).progress?.status === "running";
+  const running = ["running", "waiting_verification"].includes((await collection.progress()).progress?.status);
   if (autoReload && !running) chrome.runtime.reload(); // 等采集结束再自动更新
   return { ok: true, latest, update_available: true, reloading: !!autoReload && !running };
 }
@@ -69,6 +94,7 @@ async function gfetch(path, options) {
     const text = await response.text();
     let data = null;
     try { data = JSON.parse(text); } catch (e) { /* 非 JSON 保持 null */ }
+    await rememberSync(data);
     return { ok: true, status: response.status, data };
   } catch (e) {
     const detail = String((e && e.message) || e);
@@ -86,14 +112,33 @@ function withJsonBody(payload) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return undefined;
+  if (["backfill-query", "backfill-start", "backfill-state", "backfill-sync", "backfill-delete"].includes(msg.type)) {
+    if (!extensionPage(sender)) { sendResponse({ok:false, err:"extension-page-required"}); return true; }
+    let job;
+    if (msg.type === "backfill-start") job = collection.startBackfill(msg.options || {});
+    else if (msg.type === "backfill-delete") job = collection.deleteBackfill(msg.options || {});
+    else if (msg.type === "backfill-query") {
+      const query = new URLSearchParams({game_id:String(msg.game_id || "selected"),
+        offset:String(msg.offset || 0), limit:String(msg.limit || 10)});
+      job = gfetch("/backfill/candidates?" + query.toString());
+    } else if (msg.type === "backfill-sync") {
+      job = gfetch("/backfill/sync", withJsonBody({game_ids:msg.game_ids}));
+    } else job = chrome.storage.local.get(["pxb7-backfill-results", "pxb7-csv-sync"])
+      .then(data => ({ok:true, results:data["pxb7-backfill-results"] || {}, pending:data["pxb7-csv-sync"] || {}}));
+    job.then(sendResponse).catch(error => sendResponse({ok:false, err:String(error.message || error)}));
+    return true;
+  }
   const jobs = {
     "collection-begin":() => collection.begin(sender, msg),
     "collection-progress":() => collection.update(sender, msg),
     "collection-status":() => collection.progress(),
     "collection-cancel":() => collection.cancel(),
     "detail-start":() => collection.start(sender, msg),
-    "detail-context":() => collection.context(sender),
+    "detail-context":() => collection.context(sender, msg),
     "detail-result":() => collection.result(sender, msg),
+    "verification-pause":() => collection.verificationPause(sender, msg),
+    "verification-resume":() => collection.verificationResume(sender, msg),
+    "verification-confirm":() => collection.confirmVerification(),
   };
   if (jobs[msg.type]) {
     jobs[msg.type]().then(sendResponse).catch(e => sendResponse({ok:false, err:String(e.message || e)}));
@@ -147,8 +192,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // 自更新调度：SW 随时会被回收，用 alarms 唤醒（这是 MV3 里唯一可靠的周期任务机制）
 chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_CHECK_MINUTES });
+// 完整看板发起的补录任务：空闲时每分钟轮询领取一次（浏览器开着扩展在线即接管执行）
+const JOB_ALARM = "pxb7-backfill-job";
+chrome.alarms.create(JOB_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === UPDATE_ALARM) checkSelfUpdate(true);
+  if (alarm && alarm.name === JOB_ALARM) {
+    collection.claimBackfillJob().catch(() => {});   // 无任务/忙碌时静默
+  }
 });
 
 /** 让当前活动标签页的内容脚本立即采集本页（弹窗「采集本页」入口）。 */
@@ -175,4 +226,5 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(() => {
   checkSelfUpdate(false);
+  collection.claimBackfillJob().catch(() => {});   // 浏览器启动即检查是否有看板排队任务
 });

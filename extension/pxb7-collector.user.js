@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         pxb7 采集助手（前端 B · 本地采集通道 + 看板面板）
 // @namespace    pxb7-price-monitor
-// @version      0.6.0
+// @version      0.6.1
 // @description  在你自己浏览的 pxb7 页面上就地收集已渲染的卡片/详情 DOM，发送到本机采集网关（127.0.0.1:8765）入库；可按游戏勾选采集目标、调节每次采集张数（页内加载更多），内置实时看板面板。不主动请求任何 pxb7 地址（页内加载只触发站点自身懒加载）。
 // @author       pxb7-price-monitor
 // @match        https://www.pxb7.com/buy/*
@@ -18,7 +18,7 @@
 (function () {
   "use strict";
 
-  const SCRIPT_VERSION = "0.6.0";          // 与 @version 保持一致（上报网关用于更新检测）
+  const SCRIPT_VERSION = "0.6.1";          // 与 @version 保持一致（上报网关用于更新检测）
   const GATEWAY = "http://127.0.0.1:8765";
   const CONFIG_POLL_MS = 5 * 60 * 1000;     // 远端配置/版本轮询间隔
   const SPA_SETTLE_DEFAULT_MS = 2500;       // SPA 路由切换后的渲染等待（可被远端配置覆盖）
@@ -188,10 +188,14 @@
 
   async function expandCards(target) {
     const stats = { target, initial: 0, final: 0, rounds: 0, stalled: 0, stop: "done-target" };
-    let cards = countCards();
+    const pageUrl = location.href;
+    let checked = await checkCandidates();
+    let cards = checked.items.filter(item => item.kind === "new").length;
+    let seen = new Set(checked.items.map(item => item.id));
     stats.initial = cards;
     stats.final = cards;
     while (cards < target) {
+      if (location.href !== pageUrl) throw new Error("列表地址已变化，采集停止");
       if (stats.rounds >= SWEEP.maxRounds) { stats.stop = "done-rounds"; break; }
       if (stats.stalled >= SWEEP.maxStalled) { stats.stop = "done-stalled"; break; }
       show(`加载更多中 ${cards}/${target} 张…`, true);
@@ -202,13 +206,25 @@
         scrollForMore();
       }
       await sleep(SWEEP.intervalMs);
-      const next = countCards();
+      checked = await checkCandidates();
+      const next = checked.items.filter(item => item.kind === "new").length;
+      const added = checked.items.filter(item => !seen.has(item.id)).length;
+      checked.items.forEach(item => seen.add(item.id));
       stats.rounds += 1;
-      if (next <= cards) stats.stalled += 1; else stats.stalled = 0;
+      if (!added) stats.stalled += 1; else stats.stalled = 0;
       cards = next;
       stats.final = cards;
     }
-    return stats;
+    return {stats, items:checked.items};
+  }
+
+  async function checkCandidates() {
+    const res = await callGateway("/collection/check", {method:"POST",body:JSON.stringify({
+      url:location.href,html:document.documentElement.outerHTML})});
+    if (!res.ok || !res.data?.ok || !Array.isArray(res.data.items)) {
+      throw new Error(res.data?.error || res.err || "账号去重查询失败，采集停止");
+    }
+    return res.data;
   }
 
   async function sendPage(path, extra) {
@@ -250,36 +266,28 @@
       return;
     }
     const path = isDetail ? "/ingest/detail" : "/ingest/cards";
+    if (!isDetail) {
+      try {
+        const target = clampTarget(CONFIG.cards_target);
+        const {stats,items} = await expandCards(target);
+        const fresh = items.filter(item => item.kind === "new").slice(0,target);
+        const updated = items.filter(item => item.kind === "changed");
+        const result = await sendPage(path,{sweep: stats,selected_ids:[...fresh,...updated].map(item => item.id)});
+        if (!result.ok) return;
+        const missing = items.filter(item => ["retry", "manual"].includes(item.kind)).length;
+        show(`新增 ${result.data.new_listings}/${target}，更新 ${result.data.updated_ids.length}，重复跳过 ${items.filter(item => item.kind === "skip").length}`
+          + (missing ? `；${missing} 个缺项账号请用扩展自动补采／查缺补录` : ""),true);
+        if (fresh.length >= target && !missing) markIngested();
+        if (panel && panel.style.display !== "none") refreshPanel();
+      } catch(error) {show(error.message,false);}
+      return;
+    }
     const first = await sendPage(path, null);
     if (!first.ok) return;
     markIngested();
-    if (isDetail) {
-      const d = first.data;
-      show(`详情已入库：正在浏览=${d.viewers_masked === null ? "未公示" : d.viewers_masked}`
-        + ` 收藏=${d.favorites_cnt === null ? "未公示" : d.favorites_cnt}`, true);
-    } else {
-      const d = first.data;
-      show(`已入库 ${d.cards_parsed}/${d.cards_seen} 张`
-        + `（解析率 ${(d.parse_success_rate * 100).toFixed(0)}%，新增 ${d.new_listings}）`, true);
-      // 目标张数（面板可调）：一页 16 张，需要更多就在页内加载出更多卡片再发一次
-      const target = clampTarget(CONFIG.cards_target);
-      if (target > countCards()) {
-        const stats = await expandCards(target);
-        log("加载更多：", stats);
-        if (stats.final > stats.initial) {
-          const again = await sendPage(path, { sweep: stats });
-          if (again.ok) {
-            const n = again.data;
-            show(`已入库 ${n.cards_parsed}/${n.cards_seen} 张`
-              + `（页内加载 ${stats.rounds} 轮，目标 ${target} 张）`, true);
-          } else {
-            show("加载更多后的入库失败：" + again.error, false);
-          }
-        } else {
-          show(`本列表加载不出更多（仍为 ${stats.initial} 张）`, true);
-        }
-      }
-    }
+    const d = first.data;
+    show(`详情已入库：正在浏览=${d.viewers_masked === null ? "未公示" : d.viewers_masked}`
+      + ` 收藏=${d.favorites_cnt === null ? "未公示" : d.favorites_cnt}`, true);
     if (panel && panel.style.display !== "none") refreshPanel();
   }
 

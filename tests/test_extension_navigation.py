@@ -22,13 +22,18 @@ const sandbox = {
   sessionStorage:{getItem(k){return storage.get(k);},setItem(k,v){storage.set(k,v);}},
   setTimeout(fn){timers.push(fn);return timers.length;}, clearTimeout(){},
   setInterval(fn,ms){intervals.push([fn,ms]);},
+  PXB7_SWEEP:{clampTarget:()=>16,DEFAULTS:{},findMoreControl:()=>null,nextAction:()=> 'done-target',
+    selectCards:()=>Array.from({length:16},(_,i)=>({id:String(223456+i),url:'https://www.pxb7.com/product/'+(223456+i)+'/1'})),
+    capture:()=>'<div>current page</div>'},
   chrome:{runtime:{getManifest(){return {version:'0.4.1'};},
     onMessage:{addListener(){}}, sendMessage(msg,cb){
       if(msg.type==='config') return cb({ok:true,data:{ok:true,config:{spa_settle_ms:1}}});
       if(msg.type!=="ingest") return cb({ok:true,worker:false,taskId:"test-task"});
+      if(msg.path==='/collection/check') return cb({ok:true,data:{ok:true,items:Array.from({length:16},(_,i)=>({id:String(223456+i),kind:'new'}))}});
       sent.push(msg);
       cb({ok:true,data:{ok:true,cards_seen:16,cards_parsed:16,parse_success_rate:1,
-        new_listings:0,viewers_masked:null,favorites_cnt:0}});
+        new_listings:16,viewers_masked:null,favorites_cnt:0,accepted_ids:Array.from({length:16},(_,i)=>String(223456+i)),updated_ids:[],skipped_ids:[],
+        items:Array.from({length:16},(_,i)=>({id:String(223456+i),kind:'new',missing:[]}))}});
     }}},
   addEventListener(){}
 };
