@@ -2,7 +2,7 @@
 (function(root) {
   "use strict";
   const KEY = "pxb7-collection", ALARM = "pxb7-detail-watchdog";
-  const active = task => task && ["running", "waiting_verification"].includes(task.status);
+  const active = task => task && ["running", "waiting_verification", "needs_reconcile"].includes(task.status);
   const running = task => task && task.status === "running";
   // SPA的MessageSender.url可能是内容脚本加载时的地址；内容脚本显式报告当前href。
   // 报告地址必须仍属于发送标签页的同源、同路径、同查询串，hash用于区分原任务。
@@ -33,6 +33,22 @@
     };
     const read = async () => (await chrome.storage.local.get(KEY))[KEY] || null;
     const save = async task => { task.updatedAt = Date.now(); await chrome.storage.local.set({[KEY]:task}); };
+    const batchIdentity = task => task.batch ? {protocol_version:1, batch_id:task.batch.batch_id, claim_epoch:task.batch.claim_epoch} : {};
+    async function reportBatch(task) {
+      if (!task.batch || !deps.batchProgress) return;
+      try {
+        const response = await deps.batchProgress({...batchIdentity(task), status:task.status, reason:task.phase,
+          checkpoint:{phase:task.phase, processed:task.processed, current_id:task.currentId,
+            scanned:task.scanned || 0, pending_ids:(task.items || []).slice(task.processed).map(i=>i.id),
+            events:(task.events || []).slice(-200),diagnostics:(task.diagnostics || []).slice(-200)}});
+        if (response?.data?.counts) task.batch_counts = response.data.counts;
+        if (response?.data?.status && response.data.status!==task.status) {
+          task.status=response.data.status;
+          if (task.status==="needs_reconcile") task.phase="执行状态需对账，请取消后重新开始；已提交数据保留";
+        }
+        task.batch_report_pending = !response?.data?.ok;
+      } catch (_) { task.batch_report_pending = true; }
+    }
     async function retryAction(item, action, task) {
       if (!deps.retry) return {ok:false, err:"自动补采组件不可用，请更新扩展"};
       const token = item.retryToken || `${task.id}:${item.id}`;
@@ -50,11 +66,18 @@
         try {await retryAction(current, "cancelled", task);} catch (_) { /* 网关不可达时保留已使用的资格 */ }
       }
       task.status = status; task.phase = message;
+      if (task.batch) await reportBatch(task);
+      if (status==="done" && task.status==="partial") task.phase += "；网关核验仍有未完成项";
+      status=task.status;
+      if (task.batch && deps.flushBatch) {
+        try { task.export = (await deps.flushBatch(batchIdentity(task))).data; }
+        catch (_) { task.export = {ok:false, pending:true}; }
+      }
       await chrome.alarms.clear(ALARM);
       const worker = task.workerTab;
       task.workerTab = null;
       await save(task);
-      if (task.sourceTab && task.mode === "detail" && task.items && status === "done") {
+      if (task.sourceTab && ["detail", "auto"].includes(task.mode) && task.items && status === "done") {
         try { await chrome.tabs.sendMessage(task.sourceTab, {type:"detail-completed", url:task.sourceUrl}); } catch (_) { /* 源页已关闭 */ }
       }
       if (worker && !keepTab) {
@@ -63,11 +86,15 @@
       if (worker && keepTab) {
         try { await chrome.tabs.update(worker, {active:true}); } catch (_) { /* 用户已关闭 */ }
       }
+      if (task.scheduled && task.sourceTab && ["done", "cancelled"].includes(status)) {
+        try {await chrome.tabs.remove(task.sourceTab);} catch (_) {}
+      }
       return {ok:true, progress:view(task)};
     }
     async function navigate(task) {
       if (task.processed >= task.items.length) {
-        const short = task.mode !== "backfill" && (task.new_succeeded ?? task.succeeded) < task.requested;
+        const short = task.mode !== "backfill" && (task.purpose === "price_refresh" ? task.prices || 0
+          : task.purpose === "detail_enrich" ? task.processed : task.new_succeeded ?? task.succeeded) < task.requested;
         return finish(task, task.failed || task.incomplete || short ? "partial" : "done",
           (task.mode === "backfill" ? `补录结束：入库 ${task.succeeded}，失败 ${task.failed}`
             : `采集结束：新增 ${task.new_succeeded ?? task.succeeded}/${task.requested}，更新 ${task.updated || 0}，自动重试 ${task.retried || 0}，失败 ${task.failed}`)
@@ -86,6 +113,10 @@
       task.nonce = `${task.id}:${task.processed}:${Date.now()}`;
       task.currentId = task.items[task.processed].id;
       const current = task.items[task.processed];
+      if (task.batch && deps.batchAccess) {
+        const permit = await deps.batchAccess({...batchIdentity(task), action:"detail", id:current.id});
+        if (!permit?.data?.ok) return finish(task,"partial",permit?.data?.error || "访问预算不可用");
+      }
       if (current.kind === "retry" && !current.retryClaimed) {
         const response = await retryAction(current, "claim", task);
         if (!(response?.ok && response.data?.ok)) {
@@ -118,7 +149,7 @@
       }
       const item = task.items[task.processed];
       task.failed++;
-      if (task.mode !== "backfill" && ["new", "changed"].includes(item.kind) && !item.retryQueued
+      if (task.mode !== "backfill" && (!task.batch || task.purpose==="discover") && ["new", "changed"].includes(item.kind) && !item.retryQueued
           && !["delisted", "detail-id-mismatch"].includes(error)) {
         item.retryQueued = true;
         task.items.push({...item, kind:"retry", retryQueued:true, initialFailure:true, newOrigin:item.kind === "new"});
@@ -149,7 +180,9 @@
         task.verification = {tabId, stage, phase:task.phase, startedAt:Date.now()};
         if (task.workerTab) task.nonce = `${task.id}:${task.processed}:verification:${Date.now()}`;
         task.status = "waiting_verification";
+        (task.events ||= []).push({type:"challenge_detected",at:Date.now(),id:task.currentId,stage});
         task.phase = "等待完成网站验证；完成后继续当前账号，已入库进度保留";
+        if (task.batch) await reportBatch(task);
         await chrome.alarms.clear(ALARM);
         await save(task);
         try { await chrome.tabs.update(tabId, {active:true}); } catch (_) { /* 标签页关闭会取消任务 */ }
@@ -197,7 +230,24 @@
       return navigate(task);
     }
     const api = {
-      progress: async () => ({ok:true, progress:view(await read())}),
+      progress: () => serial(async () => {
+        const task=await read();
+        // 只补报本地状态/导出，回执丢失不重访商品。
+        if (task?.batch && (task.batch_report_pending || task.status==="needs_reconcile")) {await reportBatch(task);await save(task);}
+        if (task?.batch && !active(task) && !task.batch_report_pending && !task.export?.ok && deps.flushBatch) {
+          try {task.export=(await deps.flushBatch(batchIdentity(task))).data;await save(task);} catch (_) {}
+        }
+        return {ok:true,progress:view(task)};
+      }),
+      authorize: (sender, msg) => serial(async () => {
+        const task = await read();
+        if (!running(task) || !task.batch || task.id !== msg.taskId) return {ok:false, err:"任务已停止"};
+        const tabId = task.workerTab || task.sourceTab;
+        const url = task.workerTab ? task.items[task.processed]?.url : task.sourceUrl;
+        if (sender.tab?.id !== tabId || !samePage(sender, url, msg.pageUrl)) return {ok:false, err:"访问页面不匹配"};
+        if (!["list", "text"].includes(msg.action) || task.workerTab) return {ok:false, err:"不支持的主动访问"};
+        return deps.batchAccess({...batchIdentity(task), action:msg.action, id:msg.id});
+      }),
       deleteBackfill: options => serial(async () => {
         if (active(await read())) return {ok:false, err:"请先结束或取消采集，再删除数据"};
         const response = await deps.deleteBackfill(options);
@@ -216,6 +266,25 @@
         return beginBackfillTask(response.data);
       }),
       // 完整看板发起的中转任务：background.js 空闲时轮询领取（无任务时返回 no-pending-job）。
+      claimMonitorJob: () => serial(async () => {
+        const previous=await read();
+        if (previous?.batch && (previous.batch_report_pending || previous.status==="needs_reconcile")) {await reportBatch(previous);await save(previous);}
+        if (previous?.batch_report_pending || active(previous) || !deps.claimMonitor) return {ok:false,err:"busy"};
+        const response=await deps.claimMonitor();
+        if (!response?.data?.ok) return response;
+        const batch=response.data;
+        const task={id:`${Date.now()}-${Math.random()}`,batch,scheduled:true,sourceUrl:batch.source_url,
+          mode:"auto",purpose:batch.config.purpose,requested:batch.config.target_count,
+          total:0,processed:0,succeeded:0,failed:0,incomplete:0,status:"running",phase:"等待定时列表加载",
+          startedAt:Date.now(),errors:[],consecutiveFailures:0};
+        try {
+          task.sourceTab=(await chrome.tabs.create({url:"about:blank",active:false})).id;
+          await save(task);
+          await chrome.alarms.create(ALARM,{when:Date.now()+180000});
+          await chrome.tabs.update(task.sourceTab,{url:task.sourceUrl});
+          return {ok:true,progress:view(task)};
+        } catch (_) {return finish(task,"error","定时列表标签页创建失败");}
+      }),
       claimBackfillJob: () => serial(async () => {
         if (active(await read())) return {ok:false, err:"busy"};
         if (!deps.claimBackfillJob) return {ok:false, err:"unsupported"};
@@ -231,20 +300,33 @@
       }),
       begin: (sender, options) => serial(async () => {
         const old = await read();
+        if (old?.batch && (old.batch_report_pending || old.status==="needs_reconcile")) {await reportBatch(old);await save(old);}
+        if (old?.batch_report_pending) return {ok:false,err:"上批状态待补报，请恢复网关连接"};
         if (active(old)) return {ok:false, err:"已有采集任务进行中，请等待或取消"};
         if (!sender.tab || !/^https:\/\/www\.pxb7\.com\/(buy|product)\//.test(sender.url || sender.tab.url || "")) {
           return {ok:false, err:"不支持的采集页面"};
         }
         const sourceUrl = options.pageUrl || sender.tab.url || sender.url;
         if (!samePage(sender, sourceUrl, options.pageUrl)) return {ok:false, err:"采集页面地址不匹配"};
-        const task = {id:`${Date.now()}-${Math.random()}`, sourceTab:sender.tab.id, sourceUrl,
-          mode:options.mode === "detail" ? "detail" : "list", requested:Math.min(200, Math.max(1, Number(options.total) || 16)),
+        let batch = null;
+        if (options.protocol_version === 1) {
+          if (!deps.createBatch) return {ok:false, err:"批量采集协议不可用"};
+          const response = await deps.createBatch({url:sourceUrl, target_count:options.total,
+            purpose:options.purpose, collection_mode:options.mode,
+            ...(options.ids !== undefined ? {ids:options.ids} : {})});
+          if (!response?.data?.ok) return {ok:false, err:response?.data?.error || response?.err || "批次创建失败"};
+          batch = response.data;
+        }
+        const task = {id:`${Date.now()}-${Math.random()}`, sourceTab:sender.tab.id, sourceUrl, batch,
+          purpose:batch?.config?.purpose || "discover",
+          mode:batch?.config?.collection_mode || (options.mode === "detail" ? "detail" : "list"),
+          requested:batch?.config?.target_count || Math.min(200, Math.max(1, Number(options.total) || 16)),
           total:0, processed:0, succeeded:0, failed:0, incomplete:0, status:"running", phase:"准备卡片",
           startedAt:Date.now(), errors:[], consecutiveFailures:0};
         await save(task);
         // 列表进度消息会续期；源页意外卸载也不会留下永久运行状态。
         await chrome.alarms.create(ALARM, {when:Date.now() + 180000});
-        return {ok:true, taskId:task.id};
+        return {ok:true, taskId:task.id, batch, config:batch?.config};
       }),
       update: (sender, msg) => serial(async () => {
         const task = await read();
@@ -253,12 +335,16 @@
           if (["error", "cancelled"].includes(msg.status)) return finish(task, msg.status, String(msg.phase || "页面已变化"));
           return {ok:false};
         }
-        for (const key of ["total", "processed", "succeeded", "failed", "incomplete", "new_succeeded", "updated", "duplicates", "manual_pending"]) {
-          if (Number.isInteger(msg[key]) && msg[key] >= 0 && msg[key] <= 2000) task[key] = msg[key];
+        for (const key of ["total", "processed", "succeeded", "failed", "incomplete", "new_succeeded", "updated", "duplicates", "manual_pending", "scanned", "prices", "text_complete", "fallback", "blocks"]) {
+          if (Number.isInteger(msg[key]) && msg[key] >= 0 && msg[key] <= (task.batch ? 100000 : 2000)) task[key] = msg[key];
         }
         task.phase = String(msg.phase || task.phase).slice(0, 200);
+        if (task.batch && Array.isArray(msg.diagnostics)) {
+          task.diagnostics=[...(task.diagnostics || []),...msg.diagnostics].slice(-200);
+        }
         if (["done", "partial", "error", "cancelled"].includes(msg.status)) return finish(task, msg.status, task.phase);
         await save(task);
+        if (task.batch) await reportBatch(task);
         await chrome.alarms.create(ALARM, {when:Date.now() + 180000});
         return {ok:true};
       }),
@@ -269,13 +355,14 @@
         const items = [], seen = new Set();
         let duplicates = 0;
         let newCount = 0;
-        for (const item of Array.isArray(msg.items) ? msg.items.slice(0, 1000) : []) {
+        if (task.batch && msg.items?.length > 20000) return finish(task,"error","详情队列超出协议容量，清单已保留");
+        for (const item of Array.isArray(msg.items) ? (task.batch ? msg.items : msg.items.slice(0, 1000)) : []) {
           let url;
           try { url = new URL(item.url); } catch (_) { continue; }
           const match = url.pathname.match(/^\/product\/(\d{6,24})(?:\/|$)/);
           if (url.origin !== "https://www.pxb7.com" || !match || match[1] !== item.id) continue;
           if (seen.has(item.id)) { duplicates++; continue; }   // 重复账号不入队，计数可见
-          const kind = ["new", "changed", "retry"].includes(item.kind) ? item.kind : "new";
+          const kind = ["new", "changed", "retry", "refresh", "enrich"].includes(item.kind) ? item.kind : "new";
           if (kind === "new" && newCount >= task.requested) continue;
           if (kind === "new") newCount++;
           if (item.snapshot_round !== undefined && (typeof item.snapshot_round !== "string"
@@ -286,7 +373,8 @@
         }
         if (!items.length) return finish(task,"error","没有可用的商品详情链接");
         // 详情采集间隔（独立于列表模式）：消息显式携带优先，其次网关配置；都无 → 0（不等待）
-        if (msg.detail_interval_ms !== undefined) {
+        if (task.batch) task.detail_interval_ms = clampInterval(task.batch.config.detail_interval_ms);
+        else if (msg.detail_interval_ms !== undefined) {
           task.detail_interval_ms = clampInterval(msg.detail_interval_ms);
         } else {
           let config = {};
@@ -297,6 +385,9 @@
         task.manual_pending = Number(msg.manual_pending) || 0;
         task.new_succeeded = Number(msg.new_succeeded) || 0;
         task.updated = Number(msg.updated) || 0; task.retried = 0;
+        task.prices = Number(msg.prices) || 0;
+        task.text_complete = Number(msg.text_complete) || 0;
+        task.fallback = items.length;
         task.newIds = task.new_succeeded ? items.filter(item => item.kind === "new").map(item => item.id) : [];
         task.items = items; task.total = items.length; task.round = msg.round;
         try {
@@ -307,9 +398,18 @@
       }),
       context: (sender, msg = {}) => serial(async () => {
         const task = await read();
+        if (active(task) && task.batch && !task.workerTab && task.sourceTab===sender.tab?.id) {
+          if (!samePage(sender,task.sourceUrl,msg.pageUrl)) return finish(task,"cancelled","源列表地址已变化，已保留数据");
+          if (task.prices || task.scanned) {
+            await finish(task,"needs_reconcile","列表位置因重载丢失，需对账后取消重启；成功账号已保留");
+            return {ok:true,worker:true};
+          }
+          return {ok:true,worker:false,resumeTask:{id:task.id,requested:task.requested,mode:task.mode,
+            batch:task.batch,config:task.batch.config}};
+        }
         if (task?.status === "waiting_verification" && !task.workerTab && task.sourceTab === sender.tab?.id) {
           if (!ownsVerificationPage(task, sender, msg.pageUrl)) return finish(task, "cancelled", "列表地址已变化，已保留入库数据");
-          return {ok:true, worker:false, resumeTask:{id:task.id, requested:task.requested, mode:task.mode}};
+          return {ok:true, worker:false, resumeTask:{id:task.id, requested:task.requested, mode:task.mode, batch:task.batch, config:task.batch?.config}};
         }
         if (!active(task) || task.workerTab !== sender.tab?.id) return {ok:true, worker:false};
         const item = task.items[task.processed];
@@ -317,6 +417,7 @@
         try { url = new URL(sender.url || sender.tab.url); } catch (_) { return {ok:true, worker:true}; }
         if (!item || url.origin !== "https://www.pxb7.com" || !url.pathname.startsWith(`/product/${item.id}/`)) return {ok:true, worker:true};
         return {ok:true, worker:true, job:{taskId:task.id, nonce:task.nonce, ...item, snapshot_round:item.snapshot_round || task.round,
+          batch:task.batch, config:task.batch?.config,
           waiting_verification:task.status === "waiting_verification"}};
       }),
       verificationPause: (sender, msg) => serial(async () => {
@@ -332,7 +433,10 @@
         const task = await read();
         if (task?.status !== "waiting_verification" || task.id !== msg.taskId || !ownsVerificationPage(task, sender, msg.pageUrl)) return {ok:false};
         task.status = "running"; task.phase = task.verification.phase;
+        (task.events ||= []).push({type:"challenge_cleared",at:Date.now(),id:task.currentId,
+          waiting_ms:Date.now()-task.verification.startedAt,intervention:"unknown"});
         delete task.verification;
+        if (task.batch) await reportBatch(task);
         await save(task);
         await chrome.alarms.create(ALARM, {when:Date.now() + (task.workerTab ? 60000 : 180000)});
         return {ok:true, nonce:task.nonce, progress:view(task)};
@@ -345,6 +449,7 @@
         if (task.verification.autoAttempted) return {ok:false, error:"attempt-used"};
         // 在输入前持久化，刷新页面/后台重启不会反复操作同一个等待事件。
         task.verification.autoAttempted = true;
+        (task.events ||= []).push({type:"input_attempted",at:Date.now(),id:task.currentId});
         await save(task);
         return {ok:true, startedAt:task.verification.startedAt};
       }),
@@ -367,6 +472,7 @@
         const item = task.items[task.processed];
         if (!msg.payload || msg.payload.listing_id !== item.id || msg.payload.url !== item.url) return failed(task,"detail-id-mismatch");
         const res = await ingest("/ingest/detail", {...msg.payload, snapshot_round:item.snapshot_round || task.round,
+          ...batchIdentity(task),
           ...(item.retryToken ? {retry_token:item.retryToken} : {}),
           ...(task.mode === "backfill" ? {backfill:true} : {})});
         if (!(res.ok && res.data?.ok && res.data.snapshot_rows_updated > 0)) return failed(task, res.data?.error || res.err || "detail-not-stored");
@@ -397,6 +503,8 @@
           if (item.kind === "changed") task.updated++;
         }
         task.succeeded++; task.processed++; task.consecutiveFailures = 0;
+        if (task.batch) (task.events ||= []).push({type:"item_committed",at:Date.now(),id:item.id});
+        if (task.batch) { await reportBatch(task); await save(task); }
         return navigate(task);
       }),
       cancel: () => serial(async () => {

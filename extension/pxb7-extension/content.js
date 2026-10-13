@@ -107,6 +107,8 @@
   const VERIFY = (typeof window !== "undefined" && window.PXB7_VERIFICATION) || null;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let taskId = null, cancelled = false, workerPage = false;
+  let activeBatch = null, frozenConfig = null;
+  const batchIdentity = () => activeBatch ? {protocol_version:1, batch_id:activeBatch.batch_id, claim_epoch:activeBatch.claim_epoch} : {};
   let manualVerificationConfirmed = false;
   async function waitVerification(pageUrl, job = null, alreadyPaused = false, requireObserved = false) {
     if (!VERIFY) return true;
@@ -131,7 +133,7 @@
         show("验证已恢复，继续原采集任务", true);
         return true;
       },
-      onAttempt:CONFIG.verification_mode === "auto_slider" ? async () => {
+      onAttempt:(job?.config || frozenConfig || CONFIG).verification_mode === "auto_slider" ? async () => {
         show("正在尝试普通滑块验证；原任务进度已保留", false);
         const reply = await bg({type:"verification-attempt", ...identity()});
         if (!cancelled && location.href === pageUrl) show(reply.inputSent
@@ -156,6 +158,7 @@
   }
 
   function targetCards() {
+    if (CONFIG.target_count > 0) return CONFIG.target_count;
     return SWEEP ? SWEEP.clampTarget(CONFIG.cards_target) : 16;
   }
 
@@ -170,14 +173,25 @@
     const candidates = new Map();
     let decisions = new Map(), added = 0;
     async function scan() {
+      const cfg = frozenConfig || CONFIG;
       const refs = SWEEP.selectCards(document, Infinity, pageUrl);
       added = 0;
+      const newRefs = [];
       for (const item of refs) {
-        if (!candidates.has(item.id)) added++;
+        if (activeBatch && candidates.size >= cfg.scan_budget && !candidates.has(item.id)) break;
+        if (!candidates.has(item.id)) {added++; newRefs.push(item);}
         candidates.set(item.id, item);
       }
-      const res = await bg({type:"ingest", path:"/collection/check", payload:{url:pageUrl,
-        html:SWEEP.capture(document, Array.from(candidates.values()))}});
+      const refsToCheck = activeBatch ? newRefs : Array.from(candidates.values());
+      const responses = [];
+      for (let offset=0; offset<refsToCheck.length || !offset && !refsToCheck.length && !activeBatch; offset+=200) {
+        const part = activeBatch ? refsToCheck.slice(offset,offset+200) : refsToCheck;
+        const res = await bg({type:"ingest", path:"/collection/check", payload:{url:pageUrl,
+          ...batchIdentity(), html:SWEEP.capture(document, part, {}, {compact:!!activeBatch}), ...(activeBatch ? {selected_ids:part.map(i=>i.id)} : {})}});
+        responses.push(res);
+        if (!activeBatch || !res.ok) break;
+      }
+      const res = responses.find(r=>!r.ok || !r.data?.ok) || {ok:true,data:{ok:true,items:responses.flatMap(r=>r.data?.items || [])}};
       if (res.data?.error === "risk-page") {
         if (!await waitRejectedVerification(pageUrl)) throw new Error("采集取消或页面已变化");
         return scan();
@@ -185,26 +199,34 @@
       if (!res.ok || !res.data?.ok || !Array.isArray(res.data.items)) {
         throw new Error(res.data?.error || res.err || "账号去重查询失败，采集已停止");
       }
-      decisions = new Map(res.data.items.map(item => [item.id, item]));
+      if (!activeBatch) decisions.clear();
+      for (const item of res.data.items) decisions.set(item.id,item);
       for (const item of candidates.values()) {
         if (!decisions.has(item.id)) throw new Error("商品解析不完整，无法确认去重状态，请刷新列表");
       }
       stats.final = candidates.size;
-      return Array.from(decisions.values()).filter(item => item.kind === "new").length;
+      const wanted = cfg.ids?.length ? new Set(cfg.ids) : null;
+      return Array.from(decisions.values()).filter(item => (!wanted || wanted.has(item.id)) && (cfg.purpose === "price_refresh"
+        ? item.existing === true : cfg.purpose === "detail_enrich" ? item.existing === true && item.missing?.length : item.kind === "new")).length;
     }
     let cards = await scan();
     stats.initial = candidates.size;
     while (true) {
       if (cancelled || location.href !== pageUrl) { stats.stop = "done-route-change"; break; }
       if (!await waitVerification(pageUrl)) { stats.stop = "done-route-change"; break; }
+      if (activeBatch && candidates.size >= frozenConfig.scan_budget) {stats.stop="done-budget";break;}
       const action = SWEEP.nextAction({
-        cards, target, rounds: stats.rounds, maxRounds: SWEEP.DEFAULTS.maxRounds,
+        cards, target, rounds: stats.rounds, maxRounds:activeBatch ? frozenConfig.max_scan_rounds : SWEEP.DEFAULTS.maxRounds,
         stalled: stats.stalled, maxStalled: SWEEP.DEFAULTS.maxStalled,
         hasMoreControl: !!SWEEP.findMoreControl(document),
       });
       if (action.indexOf("done") === 0) { stats.stop = action; break; }
       show(`加载新账号 ${cards}/${target}；已检查 ${candidates.size} 个…`, true);
-      progress(`加载新账号 ${Math.min(cards, target)}/${target}；已检查 ${candidates.size} 个`);
+      progress(`加载账号 ${Math.min(cards, target)}/${target}；已检查 ${candidates.size} 个`, {scanned:candidates.size});
+      if (activeBatch) {
+        const access = await bg({type:"collection-access", taskId, pageUrl, action:"list"});
+        if (!access.data?.ok) {stats.stop="done-access-budget";break;}
+      }
       const control = action === "click" ? SWEEP.findMoreControl(document) : null;
       if (control) {
         try { control.click(); } catch (e) { SWEEP.scrollForMore(window, document); }
@@ -217,6 +239,14 @@
       stats.rounds += 1;
       if (!added) stats.stalled += 1; else stats.stalled = 0;
       cards = next;
+    }
+    if (activeBatch && frozenConfig.purpose !== "discover") {
+      const wanted = frozenConfig.ids?.length ? new Set(frozenConfig.ids) : null;
+      const selected = Array.from(candidates.values()).filter(item=> {
+        const d = decisions.get(item.id);
+        return (!wanted || wanted.has(item.id)) && d?.existing && (frozenConfig.purpose === "price_refresh" || d.missing?.length);
+      }).slice(0,target);
+      return {stats, selected, decisions};
     }
     const fresh = Array.from(candidates.values()).filter(item => decisions.get(item.id)?.kind === "new").slice(0,target);
     const other = Array.from(candidates.values()).filter(item => ["changed", "retry"].includes(decisions.get(item.id)?.kind));
@@ -330,7 +360,7 @@
       } catch (e) {
         progress("采集失败：" + String(e.message || e), {status:cancelled ? "cancelled" : "error"});
         return {ok:false, error:String(e.message || e)};
-      } finally { collecting = false; taskId = null; }
+      } finally { collecting = false; taskId = null; activeBatch = null; frozenConfig = null; }
     })();
     return collectionRun;
   }
@@ -362,7 +392,19 @@
       const matches = !key || (index >= 0 && index < 32);
       const truncated = prefix.length >= 159 && full.length <= key.length + Math.max(0, index)
         && !/详情看图|官方截图/.test(text);
-      if (text.length >= 6 && text === previous && matches && !truncated) return {node, text};
+      if (text.length >= 6 && text === previous && matches && !truncated) {
+        if (job?.batch) {
+          // 观察商品文字模块；不等待图片。迟到模块会改变签名并重新计稳定窗口。
+          const zone=document.querySelector(".product-detail");
+          const signature=(zone?.textContent || "").replace(/\s+/g," ");
+          if (waitDetailTitle._signature !== signature) {
+            waitDetailTitle._signature=signature;waitDetailTitle._stableAt=Date.now();
+          }
+          const busy=zone?.querySelector("[aria-busy='true'], .loading, .t-loading, [data-loading='true']");
+          if (busy || Date.now()-waitDetailTitle._stableAt < 800) {await sleep(100);continue;}
+        }
+        return {node, text};
+      }
       // 标题约 3 秒（30 次×100ms）仍未就绪才开始观察下架标记，连续 2 次稳定才判定。
       if (attempt >= 30) {
         delistStable = detectDelisted() ? delistStable + 1 : 0;
@@ -377,6 +419,8 @@
   async function runWorker(job) {
     cancelled = false;
     taskId = job.taskId;
+    activeBatch = job.batch || null;
+    frozenConfig = job.config || null;
     const pageUrl = location.href;
     if (!await waitVerification(pageUrl, job, job.waiting_verification)) return;
     while (!cancelled && location.href === pageUrl) {
@@ -387,7 +431,7 @@
       if (pageUrl !== job.url) error = "detail-id-mismatch";
       if (!error) {
         if (!await waitVerification(pageUrl, job)) return;
-        const clone = document.documentElement.cloneNode(true);
+        const clone = activeBatch && SWEEP?.publicCopy ? SWEEP.publicCopy(document.documentElement) : document.documentElement.cloneNode(true);
         // 标记上传副本中的主标题，兼容展开后的 DOM；不修改站点页面。
         const candidates = Array.from(clone.querySelectorAll(".product-detail div, .product-detail p, .product-detail h1"));
         const node = candidates.find(el => (el.textContent || "").trim() === title.text);
@@ -421,15 +465,21 @@
     }
     const target = resumeTask?.requested || (detailPage ? 1 : targetCards());
     const mode = resumeTask?.mode || (detailPage ? "detail" : CONFIG.collection_mode);
-    const started = resumeTask ? {ok:true, taskId:resumeTask.id} : await bg({type:"collection-begin", mode, total:target, pageUrl});
+    const protocol = !detailPage && (mode === "auto" || CONFIG.target_count > 0 || CONFIG.purpose && CONFIG.purpose !== "discover");
+    const started = resumeTask ? {ok:true, taskId:resumeTask.id, batch:resumeTask.batch, config:resumeTask.config}
+      : await bg({type:"collection-begin", mode, total:target, pageUrl,
+        ...(protocol ? {protocol_version:1, purpose:CONFIG.purpose || "discover"} : {})});
     if (!started.ok) { show(started.err || "已有采集任务", false); return started; }
     taskId = started.taskId;
+    activeBatch = started.batch || null;
+    frozenConfig = started.config || null;
     function fail(error) {
       progress(error, {status:cancelled ? "cancelled" : "error"});
       show(error, false);
       return {ok:false, error};
     }
     if (!await waitVerification(pageUrl, null, !!resumeTask)) return fail("采集取消或页面已变化");
+    if (activeBatch && !detailPage) return ingestBatch(pageUrl, fail);
     if (detailPage) {
       const ready = await waitDetailTitle(pageUrl);
       if (!ready || ready.error) return fail(ready?.error || "商品详情尚未就绪，请加载完成后重采");
@@ -513,6 +563,97 @@
     show(phase, complete);
     return {ok:true, result:d, sweep:stats, title_collection:first.titleStats};
   }
+
+  async function ingestBatch(pageUrl, fail) {
+    const cfg = frozenConfig, startedAt = Date.now();
+    const expanded = await expandCards(cfg.target_count, pageUrl);
+    const selected = expanded.selected, queued = [], quality = new Map();
+    const totals = {prices:0, new_succeeded:0, updated:0, text_complete:0, scanned:expanded.stats.final, blocks:0};
+    let round = null, stop = expanded.stats.stop;
+    async function submit(path, payload) {
+      if (cancelled || location.href !== pageUrl) throw new Error("采集取消或页面已变化");
+      const res = await bg({type:"ingest", path, payload:{...batchIdentity(), ...payload}});
+      if (!res.ok || !res.data?.ok) throw new Error(res.data?.error || res.err || "批次提交失败");
+      return res.data;
+    }
+    for (let offset=0; offset<selected.length; offset+=200) {
+      if (!await waitVerification(pageUrl)) return fail("采集取消或页面已变化");
+      const refs = selected.slice(offset,offset+200), ids = refs.map(i=>i.id);
+      progress(`保存价格事实 · 执行块 ${Math.floor(offset/200)+1}`, {...totals});
+      const first = await submit("/ingest/cards", {url:pageUrl, html:SWEEP.capture(document,refs,{}, {compact:true}),
+        selected_ids:ids, sweep:expanded.stats});
+      totals.blocks++; totals.prices += first.accepted_ids.length;
+      totals.new_succeeded += first.new_listings; totals.updated += first.updated_ids.length;
+      round = first.round;
+      const decisions = new Map(first.items.map(item=>[item.id,item]));
+      if (cfg.collection_mode !== "detail") {
+        const info = refs.map(item=> {
+          const node = item.card.querySelector(".smallCardTitle, .bigCardTitle");
+          return {id:item.id, code:node?.getAttribute("productuniqueno"), prefix:node?.getAttribute("productname") || node?.textContent || ""};
+        });
+        const cached = await submit("/collection/text-cache/query", {items:info});
+        const titleStarted = Date.now();
+        let stats = {titles:{}, provenance:{}, stop:"done", cards:0,captured:0,requested:0,attempts:0};
+        if (TITLES) stats = await TITLES.collect(document,window,{ids, refs, cached:cached.items,
+          guard:true, intervalMs:cfg.title_interval_ms, forceRefresh:cfg.force_text_refresh,
+          alive:()=>!cancelled && location.href===pageUrl, waitUntilReady:()=>waitVerification(pageUrl),
+          progress:(captured,cards)=>progress(`完整文字 ${captured}/${cards} · 执行块 ${totals.blocks}`, totals)});
+        const textItems = refs.filter(item=>stats.titles[item.id]).map(item=> {
+          const d = decisions.get(item.id), source = stats.provenance?.[item.id] || cached.items[item.id]
+            || {source:"title-api", acquired_at:new Date().toISOString()};
+          return {id:item.id, url:item.url, snapshot_round:d.snapshot_round, title:stats.titles[item.id], ...source};
+        });
+        if (textItems.length) {
+          const saved = await submit("/collection/text", {items:textItems});
+          for (const q of saved.items) quality.set(q.id,q);
+          totals.text_complete += saved.items.length;
+          await submit("/collection/text-cache/store", {items:textItems.filter(i=>!i.reused).map(item=>({
+            id:item.id, code:info.find(i=>i.id===item.id)?.code, title:item.title, source:item.source, acquired_at:item.acquired_at}))});
+        }
+        // 先保存诊断，再决定回退；访问等待跨页面与网关重启保留。
+        await bg({type:"collection-progress",taskId,phase:`全文阶段 ${Date.now()-titleStarted} 毫秒；尝试 ${stats.attempts || 0}`,
+          ...totals,diagnostics:stats.diagnostics || []});
+        if (["rate-limit","auth-required","access-denied","session-not-ready","access-budget-exhausted","access-permit-timeout","site-access-held","unexpected-content","business-error","unavailable","bridge-timeout"].includes(stats.stop)) {
+          stop = stats.stop;
+          progress(`价格已保存；${stop}，未完成资料已保留`, {status:"partial", ...totals});
+          return {ok:true, partial:true, stop, ...totals};
+        }
+      }
+      for (const item of refs) {
+        const d=decisions.get(item.id), q=quality.get(item.id);
+        if (!d?.snapshot_round) continue;
+        if (cfg.collection_mode === "detail" || !q?.complete) {
+          const title=item.card.querySelector(".smallCardTitle, .bigCardTitle");
+          queued.push({id:item.id, url:item.url, snapshot_round:d.snapshot_round,
+            kind:cfg.purpose === "detail_enrich" ? "enrich" : d.kind === "retry" || d.kind === "manual" ? "enrich" : d.kind,
+            prefix:title?.getAttribute("productname") || title?.textContent || ""});
+        }
+      }
+      progress(`执行块 ${totals.blocks} 完成；详情待补 ${queued.length}`, {...totals, fallback:queued.length});
+    }
+    if (queued.length) {
+      const reply=await bg({type:"detail-start", taskId, items:queued, round, ...totals, updated:totals.updated,
+        detail_interval_ms:cfg.detail_interval_ms});
+      if (!reply.ok) return fail(reply.err || "详情回退启动失败");
+      show(`价格 ${totals.prices}、完整文字 ${totals.text_complete}；详情回退 ${queued.length}`,true);
+      return {ok:true,queued:true,taskId,...totals};
+    }
+    const done = (cfg.purpose === "price_refresh" ? totals.prices : cfg.purpose === "detail_enrich"
+      ? selected.length : totals.new_succeeded) >= cfg.target_count;
+    progress(`任务${done ? "完成" : "部分完成"}；${stop}；${Date.now()-startedAt} 毫秒`,
+      {status:done ? "done" : "partial", processed:selected.length,succeeded:selected.length,...totals});
+    if (done) markIngested();
+    return {ok:true,partial:!done,stop,...totals};
+  }
+
+  // MAIN仅获得是否授权；批次/代次与本地凭据不进入页面世界。
+  window.addEventListener("pxb7-access-request", async event => {
+    let msg; try {msg=JSON.parse(event.detail);} catch (_) {return;}
+    if (!activeBatch || !taskId || typeof msg.token!=="string" || msg.token.length>100) return;
+    const reply = await bg({type:"collection-access", taskId, pageUrl:location.href, action:"text", id:msg.id});
+    window.dispatchEvent(new window.CustomEvent("pxb7-access-result", {detail:JSON.stringify({token:msg.token,
+      ok:!!reply.data?.ok,error:reply.data?.error || reply.err})}));
+  });
 
   // ---------- SPA 路由变化（Nuxt 客户端导航不整页刷新） ----------
   const requestedDetail = () => isDetail() && location.hash === "#pxb7-collect-detail";

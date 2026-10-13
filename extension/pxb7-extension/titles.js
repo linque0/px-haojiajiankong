@@ -26,13 +26,17 @@
       const timer = win.setTimeout(() => finish({error:"bridge-timeout"}), 120000);
       win.addEventListener("pxb7-title-result", receive);
       win.dispatchEvent(new win.CustomEvent("pxb7-title-request", {
-        detail:JSON.stringify({token, id, intervalMs:options.intervalMs, refresh:options.refresh === true})
+        detail:JSON.stringify({token, id, intervalMs:options.intervalMs, refresh:options.refresh === true,
+          cacheOnly:options.cacheOnly === true, guard:options.guard === true})
       }));
     });
   }
   async function collect(doc, win, options = {}) {
-    const refs = references(doc).filter(item => !options.ids || options.ids.includes(item.id));
-    const stats = {cards:0, captured:0, requested:0, attempts:0, retried:0, failed:0, stop:"done", titles:{}, errors:[]};
+    const refs = (options.refs ? options.refs.map(item=> {
+      const title=item.card.querySelector(".smallCardTitle, .bigCardTitle");
+      return {...item,title,text:(title?.getAttribute("productname") || title?.textContent || "").trim()};
+    }) : references(doc)).filter(item => !options.ids || options.ids.includes(item.id));
+    const stats = {cards:0, captured:0, requested:0, attempts:0, retried:0, failed:0, stop:"done", titles:{}, provenance:{}, errors:[],diagnostics:[]};
     // 间隔口径与 title-source.js intervalFor 相同：0–10000ms，未提供/非法回落 3000（0 是显式设置）。
     stats.interval_ms = (() => {
       const n = Number(options.intervalMs);
@@ -41,22 +45,32 @@
       return Math.max(0, Math.min(10000, n));
     })();
     const alive = options.alive || (() => true);
-    const getTitle = options.request || ((id, refresh) => request(win, id, {intervalMs:options.intervalMs, refresh}));
+    const getTitle = options.request || (async (id, refresh) => {
+      if (options.guard && !refresh) {
+        // 本次正常响应优先；本地历史缓存保留原时间，命中本身不发站点请求。
+        const current = await request(win,id,{intervalMs:options.intervalMs,cacheOnly:true});
+        if (current.title && (!options.forceRefresh || current.source==="list-response")) return current;
+        if (!options.forceRefresh && options.cached?.[id]) return options.cached[id];
+      }
+      return request(win, id, {intervalMs:options.intervalMs, refresh:refresh || options.forceRefresh===true, guard:options.guard});
+    });
     const pause = options.pause || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
     const pending = [], errors = new Map();
     let processed = 0;
     let failures = 0;
-    for (const item of refs) if (/五星角色|五星武器|光锥|音擎/.test(item.text)) stats.cards++;
+    for (const item of refs) if (options.guard || /五星角色|五星武器|光锥|音擎/.test(item.text)) stats.cards++;
     async function read(item, refresh = false) {
       const current = () => item.card.isConnected !== false && item.card.getAttribute("productid") === item.id;
       if (!alive()) { stats.stop = "route-change"; return false; }
       if (options.waitUntilReady && !await options.waitUntilReady()) { stats.stop = "route-change"; return false; }
-      if (!current()) { stats.stop = "list-change"; return false; }
+      if (!current() && !options.guard) { stats.stop = "list-change"; return false; }
       if (options.progress) options.progress(stats.captured, stats.cards, refresh, processed);
       const result = await getTitle(item.id, refresh);
+      stats.diagnostics.push(...(result.diagnostics || []));
+      if (result.error && !(result.diagnostics || []).length) stats.diagnostics.push({id:item.id,error:result.error});
       if (!refresh) processed++;
       if (!alive()) { stats.stop = "route-change"; return false; }
-      if (!current()) { stats.stop = "list-change"; return false; }
+      if (!current() && !options.guard) { stats.stop = "list-change"; return false; }
       if (result.requested) stats.requested++;
       stats.attempts += Number(result.attempts) || (result.requested ? 1 : 0);
       // ID 是主关联，短标题前缀用于拒绝刷新/错号响应，不用悬浮内容猜归属。
@@ -66,6 +80,8 @@
         && !/详情看图|官方截图/.test(full);
       if (full && prefix.length >= 24 && normalize(full).startsWith(prefix) && !appearsTruncated) {
         stats.titles[item.id] = full; stats.captured++; failures = 0;
+        stats.provenance[item.id] = {source:result.source || "title-api",
+          acquired_at:result.acquired_at || new Date(result.observed_at || Date.now()).toISOString(), reused:result.reused === true};
         errors.delete(item.id);
       } else {
         const error = result.error || (appearsTruncated ? "incomplete-title" : "title-mismatch");
@@ -73,8 +89,8 @@
           ...(result.status ? {status:result.status} : {})});
         if (!refresh) pending.push(item);
         // 网络失败才触发全局熔断，文案缺失/不匹配不能让后续所有商品永远没机会补采。
-        failures = ["network-error", "http-error"].includes(error) ? failures + 1 : 0;
-        if (["verification", "rate-limit", "session-not-ready", "bridge-timeout", "route-change", "list-change"].includes(result.error)) {
+        failures = ["network-error", "http-error", "fetch-rejected", "timeout"].includes(error) ? failures + 1 : 0;
+        if (["verification", "rate-limit", "auth-required", "access-denied", "access-budget-exhausted", "access-permit-timeout", "site-access-held", "unexpected-content", "session-not-ready", "bridge-timeout", "route-change", "list-change"].includes(result.error)) {
           stats.stop = result.error; return false;
         }
         if (failures >= 3) { stats.stop = "unavailable"; return false; }
@@ -83,7 +99,7 @@
       return true;
     }
     for (const item of refs) {
-      if (!/五星角色|五星武器|光锥|音擎/.test(item.text)) continue;
+      if (!options.guard && !/五星角色|五星武器|光锥|音擎/.test(item.text)) continue;
       if (!(await read(item))) break;
     }
     // 正常请求仍可进行时，整页结束后仅补采失败商品一轮，绕过其不完整缓存。

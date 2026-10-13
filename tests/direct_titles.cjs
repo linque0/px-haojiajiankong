@@ -9,8 +9,8 @@ function harness(results=[], listData={list:[]}, count=2){
     const title={textContent:short, getAttribute(name){return name==='productuniqueno'?'CODE'+index:null;}};
     return {isConnected:true,querySelector(){return title;},getAttribute(){return id;}};
   });
-  const response=(status,data)=>({status,ok:status>=200&&status<300,headers:new Headers({'content-type':'application/json'}),
-    async json(){return data;},clone(){return response(status,data);}});
+  const response=(status,data,extra={})=>({status,ok:status>=200&&status<300,headers:new Headers({'content-type':'application/json',...extra}),
+    async json(){if(data instanceof Error)throw data;return data;},clone(){return response(status,data,extra);}});
   const win={location:{href:'https://www.pxb7.com/buy/10302/1'},document:{querySelectorAll(s){return s.includes('middleCard')?cards:[];}},
     setTimeout(fn,ms){if(ms!==15000&&ms!==120000){time+=ms;queueMicrotask(fn);}return 1;},clearTimeout(){},
     addEventListener(n,fn){(listeners[n]??=[]).push(fn);},removeEventListener(n,fn){listeners[n]=(listeners[n]||[]).filter(f=>f!==fn);},
@@ -103,4 +103,23 @@ function harness(results=[], listData={list:[]}, count=2){
   h=harness();await h.ready();
   result=await T.collect(h.win.document,h.win,{request:async()=>({title:'错误商品：99个五星武器'})});
   assert.equal(result.captured,0);assert.equal(result.failed,2);
+  // 新批次：MAIN实际请求分类、尝试与阶段；仅白名单诊断跨世界传递。
+  for (const [next,error] of [
+    [[401,{}],'auth-required'],[[403,{}],'access-denied'],
+    [[429,{}, {'retry-after':'120'}],'rate-limit'],
+    [[200,{}, {'content-type':'text/html'}],'unexpected-content'],
+    [[200,new Error('invalid-json')],'invalid-json'],
+    [[200,{success:false}],'business-error']]) {
+    h=harness([next],{list:[]},1);await h.ready();
+    h.win.addEventListener('pxb7-access-request',event=> {
+      const request=JSON.parse(event.detail);
+      h.win.dispatchEvent(new h.win.CustomEvent('pxb7-access-result',{detail:JSON.stringify({token:request.token,ok:true})}));
+    });
+    result=await T.collect(h.win.document,h.win,{guard:true});
+    const first=result.diagnostics[0];assert.equal(first.error,error);assert.equal(first.attempt,1);
+    assert.equal(first.status,next[0]);assert.ok(first.duration_ms>=0);
+    if(error==='rate-limit')assert.ok(first.retry_after_until>0);
+    if(error==='invalid-json')assert.equal(first.stage,'body');
+    assert.ok(!JSON.stringify(result).includes('session-secret'));
+  }
 })().catch(e=>{console.error(e);process.exitCode=1;});

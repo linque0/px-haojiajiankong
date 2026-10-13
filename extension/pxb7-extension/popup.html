@@ -37,7 +37,15 @@
 
 <div class="cap">采集设置（保存后生效）</div>
 <section class="settings">
-  <label>采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+  <label>采集方式 <select id="c-mode"><option value="auto">自动选择（全文优先、必要详情）</option><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+  <label>任务目的 <select id="c-purpose"><option value="discover">新发现</option><option value="price_refresh">价格复采</option><option value="detail_enrich">详情补齐</option></select></label>
+  <label>本批逻辑规模（0继承手动值）<input id="c-target" type="number" min="0" max="10000" step="1" value="0"></label>
+  <label>指定商品ID（可选，逗号或空格分隔）<textarea id="c-ids" rows="2" placeholder="留空使用当前列表范围"></textarea></label>
+  <label>扫描账号预算<input id="c-scan" type="number" min="1" max="100000" step="1" value="3200"></label>
+  <label>最多扩页轮数<input id="c-rounds" type="number" min="1" max="1000" step="1" value="12"></label>
+  <label>每日主动操作预算<input id="c-budget" type="number" min="1" max="100000" step="1" value="1000"></label>
+  <label>历史文字有效期（分钟）<input id="c-cache-ttl" type="number" min="1" max="1440" step="1" value="10"></label>
+  <label><input id="c-force-text" type="checkbox">本批重新核验文字（不复用历史缓存）</label>
   <div id="mode-help" class="muted"></div>
   <label>网站验证 <select id="c-verification"><option value="manual">人工完成后续采</option><option value="auto_slider">自动尝试普通滑块一次</option></select></label>
   <div class="muted">自动模式使用浏览器调试权限，仅操作当前采集页；浏览器会显示调试提示。失败或拼图保留现场，完成验证后继续原任务。</div>

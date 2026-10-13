@@ -20,10 +20,10 @@
       return u.origin === API && /^\/api\/(?:search\/product\/|bff\/web\/product\/search\/)/.test(u.pathname);
     } catch (_) { return false; }
   }
-  function remember(id, code, title) {
+  function remember(id, code, title, source="list-response") {
     if (typeof id === "number" && !Number.isSafeInteger(id)) return; // 大整数 ID 必须由原接口字符串提供。
     if (!/^\d{6,24}$/.test(String(id)) || typeof title !== "string" || title.length > 50000) return;
-    cache.set(String(id), {code, title, time:Date.now()});
+    cache.set(String(id), {code, title, source, time:Date.now()});
     if (cache.size > 500) cache.delete(cache.keys().next().value);
   }
   function observe(data, headers) {
@@ -87,7 +87,22 @@
     return Array.from(win.document.querySelectorAll("#aliyunCaptcha-window-popup, .aliyunCaptcha-sliding-body, #WAF_NC_WRAPPER"))
       .some(node => node.getClientRects().length > 0 && win.getComputedStyle(node).visibility !== "hidden");
   }
+  function requestPermit(id) {
+    return new Promise(resolve=> {
+      const token=String(Date.now())+":"+String(Math.random());
+      const finish=value=> {win.clearTimeout(timer);win.removeEventListener("pxb7-access-result",receive);resolve(value);};
+      const receive=event=> {try {const result=JSON.parse(event.detail);if(result.token===token)finish(result);}catch (_) {}};
+      const timer=win.setTimeout(()=>finish({ok:false,error:"access-permit-timeout"}),15000);
+      win.addEventListener("pxb7-access-result",receive);
+      win.dispatchEvent(new win.CustomEvent("pxb7-access-request",{detail:JSON.stringify({token,id})}));
+    });
+  }
   async function lookup(id, options = {}) {
+    const diagnostics=[];
+    const result=await lookupWithDiagnostics(id,{...options,diagnostics});
+    return {...result,diagnostics};
+  }
+  async function lookupWithDiagnostics(id, options = {}) {
     const interval = intervalFor(options.intervalMs);
     let attempts = 0;
     const card = cardFor(id);
@@ -100,8 +115,9 @@
     if (!options.refresh && cached && cached.code === code && Date.now() - cached.time < 600000 && prefix.length >= 24
         && normalized(cached.title).startsWith(prefix)
         && (normalized(cached.title).length > prefix.length || /详情看图|官方截图/.test(cached.title))) {
-      return {title:cached.title, source:"list-response", requested:false, attempts:0};
+      return {title:cached.title, source:cached.source, observed_at:cached.time, requested:false, attempts:0};
     }
+    if (options.cacheOnly) return {available:false};
     if (riskVisible()) return {error:"verification"};
     if (!requestHeaders) return {error:"session-not-ready"};
     if (!code || !/^[A-Za-z0-9_-]{3,80}$/.test(code)) return {error:"missing-code"};
@@ -115,32 +131,54 @@
       await pause(Math.max(0, nextRequest - Date.now()));
       if (!current()) return {error:"route-change"};
       if (riskVisible()) return {error:"verification"};
+      if (options.guard) {
+        const permit = await requestPermit(id);
+        if (!permit.ok) return {error:permit.error || "access-budget-exhausted", requested:attempts>0, attempts};
+      }
       const controller = new AbortController();
       const timeout = win.setTimeout(() => controller.abort(), 15000);
       attempts++; requestsInBatch++;
+      const started=Date.now(), diagnostic={id,attempt:attempts,stage:"fetch",content_type:"unknown"};
+      const failure=(error,extra={})=> {diagnostic.error=error;return {error,requested:true,attempts,...extra};};
       try {
         const headers = new Headers(requestHeaders);
         headers.set("content-type", "application/json");
         // 使用当前站点的 fetch（保留站点随后安装的验证/请求包装），不绕开页面保护。
         const response = await win.fetch(ENDPOINT, {method:"POST", credentials:"include", headers,
           body:JSON.stringify({productUniqueNo:code}), signal:controller.signal});
-        if (response.status === 429) return {error:"rate-limit", requested:true, attempts, status:429};
-        if ([401,403].includes(response.status)) return {error:"verification", requested:true, attempts, status:response.status};
-        if (!response.ok) {
-          if (response.status >= 500 && attempt === 0) { nextRequest = Date.now() + Math.max(6000, interval * 2); continue; }
-          return {error:"http-error", requested:true, attempts, status:response.status};
+        diagnostic.status=response.status;
+        const contentType=response.headers.get("content-type") || "";
+        diagnostic.content_type=/json/i.test(contentType) ? "json" : /html/i.test(contentType) ? "html" : "other";
+        if (response.status === 429) {
+          const raw = response.headers.get("retry-after"), seconds = raw && Number(raw);
+          const until = raw && (Number.isFinite(seconds) ? Date.now() + Math.max(0,seconds)*1000 : Date.parse(raw));
+          if (Number.isFinite(until)) nextRequest=Math.max(nextRequest,until);
+          diagnostic.retry_after_until=Number.isFinite(until) ? until : null;
+          return failure("rate-limit",{status:429,retry_after_until:diagnostic.retry_after_until});
         }
-        if (!/json/i.test(response.headers.get("content-type") || "")) return {error:"verification", requested:true, attempts};
-        const data = await response.json();
-        if (!current()) return {error:"route-change", requested:true, attempts};
-        if (data.success !== true) return {error:"verification", requested:true, attempts};
-        if (typeof data.data?.showTitle !== "string" || !data.data.showTitle.trim()) return {error:"empty-title", requested:true, attempts};
-        remember(id, code, data.data.showTitle);
-        return {title:data.data.showTitle, source:"title-api", requested:true, attempts};
+        if ([401,403].includes(response.status)) return failure(options.guard ? response.status===401 ? "auth-required" : "access-denied" : "verification",{status:response.status});
+        if (!response.ok) {
+          diagnostic.error="http-error";
+          if (response.status >= 500 && attempt === 0) { nextRequest = Date.now() + Math.max(6000, interval * 2); continue; }
+          return failure("http-error",{status:response.status});
+        }
+        if (!/json/i.test(contentType)) return failure(options.guard ? "unexpected-content" : "verification");
+        diagnostic.stage="body";
+        let data;
+        try {data = await response.json();} catch (_) {return failure("invalid-json");}
+        diagnostic.stage="validate";
+        if (!current()) return failure("route-change");
+        if (data?.success !== true) return failure(options.guard ? "business-error" : "verification");
+        if (typeof data.data?.showTitle !== "string" || !data.data.showTitle.trim()) return failure("empty-title");
+        remember(id, code, data.data.showTitle,"title-api");
+        return {title:data.data.showTitle, source:"title-api", observed_at:Date.now(), requested:true, attempts};
       } catch (_) {
+        diagnostic.error=options.guard ? controller.signal.aborted ? "timeout" : "fetch-rejected" : "network-error";
         if (attempt === 0) { nextRequest = Date.now() + Math.max(6000, interval * 2); continue; }
-        return {error:"network-error", requested:true, attempts};
+        return failure(diagnostic.error);
       } finally {
+        diagnostic.duration_ms=Math.max(0,Date.now()-started);
+        options.diagnostics.push(diagnostic);
         win.clearTimeout(timeout);
         // 从请求完成计时，避免慢响应之后下一卡立即请求。
         nextRequest = Math.max(nextRequest, Date.now() + interval);
@@ -155,7 +193,7 @@
     const reply = result => win.dispatchEvent(new win.CustomEvent("pxb7-title-result", {detail:JSON.stringify({token:data.token, id:data.id, ...result})}));
     if (active) { reply({error:"busy"}); return; }
     active = true;
-    try { reply(await lookup(data.id, {intervalMs:data.intervalMs, refresh:data.refresh === true})); }
+    try { reply(await lookup(data.id, {intervalMs:data.intervalMs, refresh:data.refresh === true, cacheOnly:data.cacheOnly === true, guard:data.guard === true})); }
     catch (_) { reply({error:"network-error"}); }
     finally { active = false; }
   });

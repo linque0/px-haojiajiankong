@@ -13,7 +13,8 @@
 const GATEWAY = "http://127.0.0.1:8765";
 
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
-const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry"]);
+const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry",
+  "/collection/text", "/collection/text-cache/query", "/collection/text-cache/store"]);
 importScripts("collection.js", "slider-input.js");
 // 详情队列的间隔来自网关 /config（deps.getConfig）；列表模式不经此路径，两者互不共用。
 const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)),
@@ -21,6 +22,15 @@ const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path
       const res = await gfetch("/config");
       return (res && res.data && res.data.config) || {};
     }, retry: options => gfetch("/collection/retry", withJsonBody(options)),
+    createBatch: async options => {
+      const cfg = await gfetch("/config");
+      if (cfg.data?.capabilities?.collection_protocol !== 1) return {ok:false, err:"请升级网关：批量采集协议不可用"};
+      return gfetch("/collection/batch/create", withJsonBody(options));
+    },
+    batchProgress: payload => gfetch("/collection/batch/progress", withJsonBody(payload)),
+    batchAccess: payload => gfetch("/collection/batch/access", withJsonBody(payload)),
+    flushBatch: payload => gfetch("/collection/batch/flush", withJsonBody(payload)),
+    claimMonitor: () => gfetch("/collection/monitor/claim", withJsonBody({})),
     prepareBackfill: options => gfetch("/backfill/prepare", withJsonBody(options)),
     deleteBackfill: options => gfetch("/backfill/delete", withJsonBody(options)),
     // 完整看板发起的补录中转：领取/回报 + 单项结果台账上报（尽力而为）。
@@ -146,6 +156,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     "collection-begin":() => collection.begin(sender, msg),
     "collection-progress":() => collection.update(sender, msg),
     "collection-status":() => collection.progress(),
+    "collection-access":() => collection.authorize(sender, msg),
     "collection-cancel":() => collection.cancel(),
     "detail-start":() => collection.start(sender, msg),
     "detail-context":() => collection.context(sender, msg),
@@ -212,7 +223,7 @@ chrome.alarms.create(JOB_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === UPDATE_ALARM) checkSelfUpdate(true);
   if (alarm && alarm.name === JOB_ALARM) {
-    collection.claimBackfillJob().catch(() => {});   // 无任务/忙碌时静默
+    collection.claimBackfillJob().then(()=>collection.claimMonitorJob()).catch(() => {});
   }
 });
 

@@ -178,24 +178,26 @@ function renderPaths(p) {
 let settingsDirty = false;
 function modeHelp() {
   const detail = $("c-mode").value === "detail";
+  const auto = $("c-mode").value === "auto";
   $("mode-help").textContent = detail
     ? "从列表保存清单和价格，再逐个打开详情采集；关闭弹窗仍可继续。切换方式用于下一次任务。"
+    : auto ? "先保存价格、核验公开全文与字段，只有缺项进入详情。逻辑任务按最多200条分块，配置在开始时冻结。新任务目的和规模仅扩展支持。"
     : "读取列表全文；缺失时按商品编号限速获取，可能受网站预检限制。";
   // 两种间隔互不共用：详情模式启用详情间隔、停用列表间隔；列表模式相反。
   $("c-title-interval").disabled = detail;
-  $("c-detail-interval").disabled = !detail;
+  $("c-detail-interval").disabled = !detail && !auto;
 }
-["c-mode", "c-verification", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-detail-interval", "c-debug"].forEach(id => {
+["c-mode", "c-purpose", "c-target", "c-ids", "c-scan", "c-rounds", "c-budget", "c-cache-ttl", "c-force-text", "c-verification", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-detail-interval", "c-debug"].forEach(id => {
   $(id).addEventListener("input", () => {settingsDirty = true; modeHelp();});
 });
 function renderProgress(p) {
   if (!p) return;
-  const labels = {running:"进行中", waiting_verification:"等待网站验证", done:"已完成", partial:"部分完成", error:"失败", cancelled:"已取消", paused:"已暂停"};
-  const busy = ["running", "waiting_verification"].includes(p.status);
+  const labels = {running:"进行中", waiting_verification:"等待网站验证", needs_reconcile:"位置丢失待对账（可取消）", done:"已完成", partial:"部分完成", error:"失败", cancelled:"已取消", paused:"已暂停"};
+  const busy = ["running", "waiting_verification", "needs_reconcile"].includes(p.status);
   $("resume-verification").hidden = p.status !== "waiting_verification";
-  $("progress-mode").textContent = (p.mode === "backfill" ? "信息补录" : p.mode === "detail" ? "详情页采集" : "列表采集") + " · " + (labels[p.status] || p.status);
-  const completed = p.mode === "backfill" ? p.processed : p.new_succeeded ?? p.processed;
-  $("progress-count").textContent = `${completed}/${p.requested} ${p.mode === "backfill" ? "张" : "个新账号"}`;
+  $("progress-mode").textContent = (p.mode === "backfill" ? "信息补录" : p.mode === "auto" ? "自动选择" : p.mode === "detail" ? "详情页采集" : "列表采集") + " · " + (labels[p.status] || p.status);
+  const completed = p.mode === "backfill" || p.purpose === "detail_enrich" ? p.processed : p.purpose === "price_refresh" ? p.prices || 0 : p.new_succeeded ?? p.processed;
+  $("progress-count").textContent = `${completed}/${p.requested} ${p.mode === "backfill" ? "张" : p.purpose === "price_refresh" ? "个价格观察" : p.purpose === "detail_enrich" ? "个补齐任务" : "个新账号"}`;
   $("collect-progress").value = Math.min(100, Math.round(completed / Math.max(1, p.requested) * 100));
   $("progress-phase").textContent = p.phase;
   const seconds = Math.max(0, Math.round(((busy ? Date.now() : p.updatedAt) - p.startedAt) / 1000));
@@ -203,6 +205,9 @@ function renderProgress(p) {
     + (p.incomplete ? ` · 待补齐 ${p.incomplete}` : "");
   if (p.mode !== "backfill") $("progress-detail").textContent +=
     ` · 更新 ${p.updated || 0} · 重复跳过 ${p.duplicates || 0} · 自动重试 ${p.retried || 0} · 待补录 ${p.manual_pending || 0}`;
+  if (p.batch) $("progress-detail").textContent += ` · 扫描 ${p.scanned || 0} · 价格 ${p.prices || 0} · 完整文字 ${p.batch_counts?.text_complete || p.text_complete || 0} · 回退 ${p.fallback || 0} · 执行块 ${p.blocks || 0}`
+    + (p.export && !p.export.ok ? " · 数据已入库，导出待重试" : p.export ? " · 导出已同步" : " · 导出等待中");
+  if (p.export?.handoff) $("progress-detail").textContent += p.export.handoff.ok ? " · 趋势视图已更新（估值发布待交接）" : " · 分析交接待重试";
   $("cancel-collect").disabled = !busy;
   $("grab").disabled = busy || bfStarting;
   bfBusy = busy;
@@ -250,26 +255,39 @@ async function refresh() {
   if (settingsDirty) return;
   const c = s.config || {};
   $("c-mode").value = c.collection_mode || "list";
+  $("c-purpose").value = c.purpose || "discover";
+  $("c-target").value = c.target_count || 0;
+  $("c-ids").value = (c.selected_listing_ids || []).join(", ");
+  $("c-scan").value = c.scan_budget || 3200;
+  $("c-rounds").value = c.max_scan_rounds || 12;
+  $("c-budget").value = c.daily_access_budget || 1000;
+  $("c-cache-ttl").value = c.text_cache_ttl_minutes || 10;
+  $("c-force-text").checked = !!c.force_text_refresh;
   $("c-verification").value = c.verification_mode || "manual";
   modeHelp();
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
   $("c-cards").value = c.cards_target || 16;
   $("c-settle").value = c.spa_settle_ms;
-  $("c-title-interval").value = (c.title_interval_ms || 3000) / 1000;
+  $("c-title-interval").value = (c.title_interval_ms ?? 3000) / 1000;
   $("c-detail-interval").value = (c.detail_interval_ms ?? 0) / 1000;
   $("c-debug").checked = !!c.debug;
 }
 
 // ---------- 操作 ----------
 async function saveSettings() {
-  for (const id of ["c-cards", "c-interval", "c-settle", "c-title-interval", "c-detail-interval"]) {
+  for (const id of ["c-target", "c-scan", "c-rounds", "c-budget", "c-cache-ttl", "c-cards", "c-interval", "c-settle", "c-title-interval", "c-detail-interval"]) {
     if (!$(id).checkValidity()) {$(id).reportValidity(); return false;}
   }
   const res = await gfetch("/config", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       collection_mode: $("c-mode").value,
+    purpose:$("c-purpose").value, target_count:Number($("c-target").value),
+    selected_listing_ids:$("c-ids").value.trim() ? $("c-ids").value.trim().split(/[\s,，]+/) : [],
+    scan_budget:Number($("c-scan").value), max_scan_rounds:Number($("c-rounds").value),
+    daily_access_budget:Number($("c-budget").value), text_cache_ttl_minutes:Number($("c-cache-ttl").value),
+    force_text_refresh:$("c-force-text").checked,
       verification_mode: $("c-verification").value,
       auto_ingest: $("c-auto").checked,
       reingest_interval_min: Number($("c-interval").value),

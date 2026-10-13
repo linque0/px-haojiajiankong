@@ -56,9 +56,9 @@ def test_detail_interval_separate_from_list() -> None:
     assert 'id="c-detail-interval" min="0" max="10" step="0.1"' in dashboard
     assert 'detail_interval_ms: Number($("c-detail-interval").value) * 1000' in popup_js
     assert 'detail_interval_ms: Number($("c-detail-interval").value) * 1000' in dashboard
-    # 弹窗按模式互斥启停：详情模式启用详情间隔、停用列表间隔
+    # 详情模式独立；auto同时使用全文路径和详情回退，因此两种间隔都可配置。
     assert '$("c-title-interval").disabled = detail;' in popup_js
-    assert '$("c-detail-interval").disabled = !detail;' in popup_js
+    assert '$("c-detail-interval").disabled = !detail && !auto;' in popup_js
     # 详情队列独立取值：collection.js 的钳制与网关配置键
     queue_js = _read(EXT / "collection.js")
     assert "clampInterval" in queue_js and "Math.min(10000" in queue_js

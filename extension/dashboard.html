@@ -115,6 +115,12 @@
 
   <div class="grid" id="tiles"></div>
 
+  <section>
+    <h2>逻辑采集任务与定时监控</h2>
+    <p class="muted">任务规模按开始时的配置执行。定时任务在tasks.yaml明确启用；浏览器离线会保留延期和错过记录。时间按上海显示。</p>
+    <div id="collection-jobs" class="muted">暂无逻辑批次</div>
+    <div id="monitor-jobs" class="muted"></div>
+  </section>
   <div class="cols">
     <section>
       <h2>最近批次（实时）</h2>
@@ -261,7 +267,16 @@
     <section>
       <h2>插件设置（脚本自动应用：≤5 分钟或页面刷新生效）</h2>
       <label><input type="checkbox" id="c-auto"> 自动采集（浏览到列表/详情页时入库）</label>
-      <label>扩展采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+      <label>扩展采集方式 <select id="c-mode"><option value="auto">自动选择（全文优先、必要详情）</option><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+      <label>任务目的 <select id="c-purpose"><option value="discover">新发现</option><option value="price_refresh">价格复采</option><option value="detail_enrich">详情补齐</option></select></label>
+      <label>本批逻辑规模（0继承手动值）<input id="c-target" type="number" min="0" max="10000" step="1"></label>
+      <label>指定商品ID（可选，逗号或空格分隔）<textarea id="c-ids" rows="2" placeholder="留空使用当前列表范围"></textarea></label>
+      <label>扫描账号预算<input id="c-scan" type="number" min="1" max="100000" step="1"></label>
+      <label>最多扩页轮数<input id="c-rounds" type="number" min="1" max="1000" step="1"></label>
+      <label>每日主动操作预算<input id="c-budget" type="number" min="1" max="100000" step="1"></label>
+      <label>历史文字有效期（分钟）<input id="c-cache-ttl" type="number" min="1" max="1440" step="1"></label>
+      <label><input id="c-force-text" type="checkbox">本批重新核验文字（不复用历史缓存）</label>
+      <p class="muted">新目的和逻辑规模由扩展执行；每块最多200条，任务开始后冻结参数。预算计受控主动操作，页面自行发出的请求另计覆盖未知。</p>
       <label>扩展网站验证 <select id="c-verification"><option value="manual">人工完成后续采</option><option value="auto_slider">自动尝试普通滑块一次</option></select></label>
       <p class="muted">自动模式需v0.5.14扩展的浏览器调试权限，仅操作当前采集页，浏览器会显示调试提示。失败或拼图保留现场；油猴不支持此模式。</p>
       <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
@@ -364,6 +379,7 @@ function renderBatches(rows) {
 });
 
 function render(s) {
+  renderCollection(s.collection || {});
   $("task-pill").textContent = `任务 ${s.task.task_id}（${s.task.name}）`;
   $("script-pill").textContent = `插件批次 ${s.stats.batches} · 最近 ${s.stats.last_batch_at ?? "—"}`;
   const sc = s.script || {};
@@ -440,6 +456,44 @@ function render(s) {
     tasks.map(([tid, e]) => `<div>· ${esc(tid)}：<b>${esc(e.level)}</b>` +
       `（${esc(e.reason ?? "—")}）` +
       (e.backoff_until ? `退避至 ${esc(e.backoff_until)}` : "") + `</div>`).join("");
+}
+function renderCollection(data) {
+  const labels={running:"进行中",waiting_verification:"等待验证",needs_reconcile:"位置丢失待对账",done:"完成",partial:"部分完成",cancelled:"取消",error:"失败",paused:"暂停",queued:"等待领取",deferred:"浏览器离线延期",missed:"已错过",claimed:"扩展已领取"};
+  const purposes={discover:"新发现",price_refresh:"价格复采",detail_enrich:"详情补齐"};
+  const time=value=>value ? new Date(value).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"}) : "—";
+  $("collection-jobs").innerHTML=(data.batches || []).map(b=> {
+    const c=b.counts || {};
+    const exp=(data.exports || []).find(e=>e.game_id===b.game_id);
+    const sync=exp && exp.dirty_generation>exp.exported_generation ? exp.error ? "导出待重试" : "导出等待中" : "导出已同步";
+    const analysis=b.handoff?.ok ? "趋势视图已更新，估值发布待交接" : "分析等待中";
+    return `<p><b>${esc(purposes[b.config?.purpose])} · 目标 ${esc(b.config?.target_count)}</b> · ${esc(labels[b.status] || b.status)}<br>`
+      +`扫描 ${esc(c.scanned)} · 价格 ${esc(c.prices)} · 新增 ${esc(c.new)} · 完整介绍 ${esc(c.text_complete)} · 文字与字段满足 ${esc(c.complete)} · 待补 ${esc(c.pending)} · 主动操作 ${esc(b.active_operations)}<br>`
+      +`${esc(time(b.started_at))} · ${esc(sync)} · ${esc(analysis)} · ${esc(b.stop_reason)}`
+      +(b.status==="needs_reconcile" ? ` <button class="ghost" data-reconcile-cancel="${esc(b.batch_id)}">已对账，取消未完成部分</button>` : "")
+      +(!["running","waiting_verification"].includes(b.status) ? ` <button class="ghost" data-local-retry="${esc(b.batch_id)}">重试本地导出与分析</button>` : "")+"</p>";
+  }).join("") || esc(data.error || "暂无逻辑批次");
+  if (data.site_hold) {
+    $("collection-jobs").insertAdjacentHTML("afterbegin",`<p>站点访问等待：${esc(data.site_hold.reason)}${data.site_hold.retry_after_until ? " · 恢复时间 "+esc(time(data.site_hold.retry_after_until)) : " · 恢复时间未知"} <button class="ghost" id="clear-site-hold">已在网站确认可访问，解除等待</button></p>`);
+    $("clear-site-hold").addEventListener("click",async()=> {
+      const result=await (await fetch("/collection/batch/clear-hold",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json();
+      $("clear-site-hold").textContent=result.ok ? "等待已解除" : result.error;
+    });
+  }
+  $("monitor-jobs").innerHTML=(data.monitor_jobs || []).map(j=>`<p>${esc(j.task_id)} · ${esc(time(j.due_at))} · ${esc(labels[j.status] || j.status)} · ${esc(j.reason)}${j.coalesced_slots ? " · 合并错过轮次 "+esc(j.coalesced_slots) : ""}</p>`).join("");
+  for (const button of $("collection-jobs").querySelectorAll("[data-local-retry]")) button.addEventListener("click",async()=> {
+    button.disabled=true;
+    try {const result=await (await fetch("/collection/batch/retry-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({batch_id:button.dataset.localRetry})})).json();
+      button.textContent=result.ok && result.handoff?.ok!==false ? "本地处理完成" : "仍待重试";
+    } catch (_) {button.textContent="网关不可用";}
+    button.disabled=false;
+  });
+  for (const button of $("collection-jobs").querySelectorAll("[data-reconcile-cancel]")) button.addEventListener("click",async()=> {
+    button.disabled=true;
+    try {const result=await (await fetch("/collection/batch/cancel-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({batch_id:button.dataset.reconcileCancel})})).json();
+      button.textContent=result.ok ? "已取消，数据保留" : result.error;
+    } catch (_) {button.textContent="网关不可用";}
+    button.disabled=false;
+  });
 }
 
 // ---------- 采集目标（多选：只采集勾选的游戏） ----------
@@ -529,6 +583,14 @@ async function savePaths(payload, okText) {
 
 function fillConfig(c) {
   $("c-mode").value = c.collection_mode || "list";
+  $("c-purpose").value = c.purpose || "discover";
+  $("c-target").value = c.target_count || 0;
+  $("c-ids").value = (c.selected_listing_ids || []).join(", ");
+  $("c-scan").value = c.scan_budget || 3200;
+  $("c-rounds").value = c.max_scan_rounds || 12;
+  $("c-budget").value = c.daily_access_budget || 1000;
+  $("c-cache-ttl").value = c.text_cache_ttl_minutes || 10;
+  $("c-force-text").checked = !!c.force_text_refresh;
   $("c-verification").value = c.verification_mode || "manual";
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
@@ -557,6 +619,11 @@ async function saveConfig(payload) {
 
 $("save").addEventListener("click", () => saveConfig({
   collection_mode: $("c-mode").value,
+  purpose:$("c-purpose").value, target_count:Number($("c-target").value),
+  selected_listing_ids:$("c-ids").value.trim() ? $("c-ids").value.trim().split(/[\s,，]+/) : [],
+  scan_budget:Number($("c-scan").value), max_scan_rounds:Number($("c-rounds").value),
+  daily_access_budget:Number($("c-budget").value), text_cache_ttl_minutes:Number($("c-cache-ttl").value),
+  force_text_refresh:$("c-force-text").checked,
   verification_mode: $("c-verification").value,
   auto_ingest: $("c-auto").checked,
   reingest_interval_min: Number($("c-interval").value),

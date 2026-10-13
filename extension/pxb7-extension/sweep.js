@@ -70,7 +70,34 @@
   }
 
   /** 在上传副本中标记选中卡片，parser 优先使用语义属性，避免把推荐位/超额卡片入库。 */
-  function capture(doc, selected, titles = {}) {
+  function publicCopy(node) {
+    const clone=node.cloneNode(true);
+    for (const el of clone.querySelectorAll("script,style,iframe,object,embed,canvas,svg,video,audio,source,link,meta,input,textarea,select,.seller-info,.seller-contact")) el.remove();
+    for (const img of clone.querySelectorAll("img")) {
+      if (img.getAttribute("alt")) img.replaceWith(img.getAttribute("alt")); else img.remove();
+    }
+    const allowed=new Set(["id","class","title","href","productid","productname","productuniqueno","price","createtime","pcimgcount","important","collectcount","itemprop","data-yellow","data-map-exploration",
+      "data-listing-id","data-id","data-product-title","data-pxb7-full-title","data-pxb7-full-title-id"]);
+    for (const el of [clone,...clone.querySelectorAll("*")]) {
+      const style=String(el.getAttribute("style") || "").replace(/\s/g,"").toLowerCase();
+      for (const attr of Array.from(el.attributes || [])) {
+        if (!allowed.has(attr.name)) el.removeAttribute(attr.name);
+        else if (attr.name==="href" && !/^(?:https:\/\/www\.pxb7\.com)?\/(?:buy|product)\//.test(attr.value)) el.removeAttribute(attr.name);
+      }
+      if (style.includes("display:none")) el.setAttribute("style","display:none");
+      else if (style.includes("visibility:hidden")) el.setAttribute("style","visibility:hidden");
+    }
+    return clone;
+  }
+  function capture(doc, selected, titles = {}, options = {}) {
+    if (options.compact) {
+      const fragments=selected.map(item=> {
+        const clone=publicCopy(item.node || item.card);
+        clone.setAttribute("data-listing-id",item.id);
+        return clone.outerHTML;
+      });
+      return "<html><body>"+fragments.join("")+"</body></html>";
+    }
     const clone = doc.documentElement.cloneNode(true);
     // 下一页替换 DOM 时，保留本次已观察到的真实卡片副本。
     const present = new Set(selectCards({querySelectorAll:s => clone.querySelectorAll(s)}, Infinity,
@@ -151,7 +178,7 @@
     return moved;
   }
 
-  const api = { DEFAULTS, clampTarget, countCards, selectCards, capture, findMoreControl, nextAction, scrollForMore };
+  const api = { DEFAULTS, clampTarget, countCards, selectCards, capture, publicCopy, findMoreControl, nextAction, scrollForMore };
   root.PXB7_SWEEP = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);
