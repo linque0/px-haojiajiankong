@@ -393,6 +393,7 @@ class Task:
     pages_per_run: int
     runs_per_day: int
     notes: str = ""
+    monitor: Mapping[str, Any] | None = None
 
     def filter_json(self) -> str:
         import json
@@ -787,6 +788,11 @@ def load_tasks(path: str | os.PathLike[str] | None = None, *,
             warnings.append(
                 f"{ctx}.runs_per_day={runs_per_day} 超出 docs/01 §3.1-4 的 2–4 轮档")
 
+        from .monitor import validate as validate_monitor
+        try:
+            monitor = validate_monitor(item.get("monitor"), game_id=game_id, biz_prod=biz_prod)
+        except ValueError as exc:
+            raise ConfigError(f"{ctx}.{exc}") from exc
         task = Task(
             task_id=task_id,
             name=_require_str(item, "name", ctx),
@@ -799,6 +805,7 @@ def load_tasks(path: str | os.PathLike[str] | None = None, *,
             pages_per_run=pages_per_run,
             runs_per_day=runs_per_day,
             notes=str(item.get("notes") or ""),
+            monitor=monitor,
         )
         # 任务 URL 必须过守卫（构建即校验）
         settings.site.listing_url(task.game_id, task.biz_prod)

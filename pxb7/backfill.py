@@ -348,7 +348,11 @@ def sync(state, payload: dict) -> dict:
         results = []
         for game in games:
             try:
-                results.append(sync_game_csv(state.settings, conn, game_id=game))
+                result=sync_game_csv(state.settings, conn, game_id=game)
+                results.append(result)
+                tables={r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+                if result.get("ok") and "collection_export_state" in tables:
+                    conn.execute("UPDATE collection_export_state SET exported_generation=dirty_generation,error=NULL WHERE game_id=?",[game])
             except Exception as exc:
                 results.append({"ok": False, "game_id": game, "error": str(exc)[:300],
                                 "message": "数据表同步失败，请检查分析视图或目录后重试"})

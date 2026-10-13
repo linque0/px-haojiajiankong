@@ -1149,7 +1149,8 @@ def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
                          favorites_cnt: int | None,
                          attributes: Mapping[str, Any] | None = None,
                          features: Mapping[str, Any] | None = None,
-                         snapshot_at: _dt.datetime | None = None) -> int:
+                         snapshot_at: _dt.datetime | None = None,
+                         public_fields: bool = False) -> int:
     """把详情页 M5 字段（正在浏览/收藏）回填该 listing **最近一轮**快照。
 
     前端 B 采集插件通道：详情页通常与列表卡片不在同一批到达，这里按 listing 定位
@@ -1168,6 +1169,13 @@ def update_detail_fields(conn: duckdb.DuckDBPyConnection, listing_id: str, *,
         if (attributes or {}).get(name) is not None:
             assignments.append(f"{name} = ?")
             params.append(attributes[name])
+    if public_fields:
+        # 固定白名单，价格始终只走列表真实观察路径。
+        for name in ("server", "publish_time_text", "mail_status", "tap_status", "psn_status", "trade_code_status",
+                     "has_compensation", "official_verified", "skins"):
+            if (attributes or {}).get(name) is not None:
+                assignments.append(f"{name} = ?")
+                params.append(attributes[name])
     if features:
         merged = json.loads(current[1]) if current[1] else {}
         for count, roster, scalar, prior in (

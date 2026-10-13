@@ -731,6 +731,19 @@ def detail_product_text(html: str) -> str:
     return _detail_root(html).get_text("", strip=True)
 
 
+def parse_detail_public_fields(html: str) -> dict[str, Any]:
+    """新版采集的详情独有公开文字；价格另走真实观察，不在补齐路径覆盖。"""
+    root=_detail_root(html)
+    fields={}
+    for name in ("server","publish_time_text","mail_status","tap_status","psn_status","trade_code_status",
+                 "has_compensation","official_verified","skins"):
+        if name in FIELD_SPECS:
+            hit=_extract(root,name,FIELD_SPECS[name])
+            if hit is not None:
+                fields[name]=hit.value
+    return fields
+
+
 def parse_detail_attributes(html: str) -> tuple[str | None, dict[str, Any]]:
     """只解析当前商品，剔除推荐卡片；逐字 span 标题拼回完整文字。"""
     root = _detail_root(html)

@@ -30,6 +30,8 @@ import os
 import re
 import sys
 import threading
+import time
+import hashlib
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +45,8 @@ from . import parser as P
 from . import pipeline as PL
 from . import collection as CC
 from . import weapons as W
+from . import collection_jobs as CJ
+from . import export_queue as EQ
 from .collector import (
     _check_component,
     _collect_page_signals,
@@ -64,6 +68,10 @@ from .risk import SIGNAL_CAPTCHA, SIGNAL_IP_BLOCKED, RiskStateStore, TaskRisk
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_BODY_BYTES = 8 * 1024 * 1024
+COLLECTION_PROTOCOL_PATHS = frozenset({"/collection/batch/create", "/collection/batch/progress",
+    "/collection/batch/access", "/collection/batch/flush", "/collection/text",
+    "/collection/text-cache/query", "/collection/text-cache/store", "/collection/monitor/claim", "/collection/batch/retry-local",
+    "/collection/batch/clear-hold", "/collection/batch/cancel-local"})
 
 # 静态资产（看板 / 用户脚本）：固定路径伺服，不接受任何用户输入拼接
 _DASHBOARD_FILE = PROJECT_ROOT / "extension" / "dashboard.html"
@@ -82,6 +90,14 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
     "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
     "verification_mode": "manual", # manual / auto_slider（一次普通滑块交互）
+    "purpose": "discover",
+    "target_count": 0,             # 0继承手动cards_target；逻辑任务独立于200条执行块。
+    "scan_budget": 3200,
+    "max_scan_rounds": 12,
+    "daily_access_budget": 1000,
+    "text_cache_ttl_minutes": 10,
+    "force_text_refresh": False,
+    "selected_listing_ids": [],     # 可选商品范围；空数组沿用当前列表范围。
     "targets": [],                 # 采集目标：dim_task.task_id 列表；空=只用网关启动任务
     "paths": {},                   # 数据路径自定义：{db|raw_root|runs|log_dir: 绝对路径}
 }
@@ -95,6 +111,13 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "cards_target": (int, (1, 200)),
     "collection_mode": (str, None),
     "verification_mode": (str, None),
+    "purpose": (str, None),
+    "target_count": (int, (0, CJ.MAX_TARGET)),
+    "scan_budget": (int, (1, 100000)),
+    "max_scan_rounds": (int, (1, 1000)),
+    "daily_access_budget": (int, (1, 100000)),
+    "text_cache_ttl_minutes": (int, (1, 1440)),
+    "force_text_refresh": (bool, None),
 }
 _TASK_ID_RE = re.compile(r"[0-9A-Za-z_\-]{1,64}")
 
@@ -167,6 +190,9 @@ class GatewayState:
         # RLock：handle_ingest 外层持锁期间，_ingest_* 里的 note() 会再次进入
         self.lock = threading.RLock()
         self.collection_db: str | None = None
+        self.exports = EQ.ExportQueue(settings)
+        from .monitor import Monitor
+        self.monitor = Monitor(self)
         self.stats: dict[str, Any] = {
             "batches": 0, "cards_seen": 0, "cards_parsed": 0, "snapshots_inserted": 0,
             "new_listings": 0, "details_stored": 0, "risk_pages_rejected": 0,
@@ -261,8 +287,14 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
     if not isinstance(raw, dict):
         raise GatewayError("配置必须是对象")
     for key, value in raw.items():
-        if key not in _PLUGIN_CONFIG_SPEC and key not in ("targets", "paths"):
+        if key not in _PLUGIN_CONFIG_SPEC and key not in ("targets", "paths", "selected_listing_ids"):
             raise GatewayError(f"未知配置项：{key}")
+        if key == "selected_listing_ids":
+            if not isinstance(value, list) or len(value) > CJ.MAX_TARGET or any(
+                    not isinstance(i, str) or not CC.ID_RE.fullmatch(i) for i in value):
+                raise GatewayError("商品范围必须是字符串ID数组（最多10000项）")
+            merged[key] = list(dict.fromkeys(value))
+            continue
         if key == "targets":
             merged[key] = _validate_targets(value, known_ids=known_targets)
             continue
@@ -294,7 +326,8 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
                 raise GatewayError(f"配置 {key}={value} 超出范围 {bounds[0]}–{bounds[1]}")
             value = round(value / 100) * 100
         elif expect_type is str:
-            choices = ("manual", "auto_slider") if key == "verification_mode" else ("list", "detail")
+            choices = (("manual", "auto_slider") if key == "verification_mode" else CJ.PURPOSES
+                       if key == "purpose" else ("list", "detail", "auto"))
             if value not in choices:
                 raise GatewayError(f"{key} 必须是 {' 或 '.join(choices)}")
         else:
@@ -517,19 +550,40 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
         return 422, {"ok": False, "error": "game-unresolved",
                      "message": "无法识别该详情页所属游戏（已尝试本地库与页面面包屑）；"
                                 "请先浏览目标游戏的列表页，或该游戏尚无采集任务"}
-    task = state.match_task(game_id, biz_prod)
+    if payload.get("batch_id"):
+        with PL.run_lock(state.settings),db.connect(state.settings.paths.db) as conn:
+            task=state.task_by_id(CJ.get(conn,payload)["task_id"])
+        if task and task.game_id != game_id:
+            return 409,{"ok":False,"error":"batch-item-game-mismatch"}
+    else:
+        task = state.match_task(game_id, biz_prod)
     if task is None:
         return _target_not_selected(state, game_id)
     ensure_collection(state)
 
     fields = _parse_detail_fields(html)
     title, attributes = P.parse_detail_attributes(html)
+    if payload.get("batch_id"):
+        attributes.update(P.parse_detail_public_fields(html))
     extraction = X.extract_listing(X.seed_keywords(game_id=game_id),
                                    listing_id=listing_id, title=title, card_fields=attributes)
     if game_id == 10302:
         extraction.features[W.FEATURE] = W.observe(
             title, P.detail_product_text(html), attributes, extraction.features)
     extraction.features["_detail_fields"] = list(attributes)
+    if payload.get("batch_id"):
+        product_text=P.detail_product_text(html)
+        labels={"level":r"等级|\d+级","yellow_cnt":r"黄数|\d+黄","five_star_chars":r"五星角色",
+                "five_star_weapons":r"五星武器","wuwa_resources":r"星声|月相|珊瑚|结晶|唤声|唤月",
+                "server":r"区服|服务器|官服|B服","publish_time_text":r"发布|上架","favorites_cnt":r"收藏"}
+        values={**attributes,**fields,"wuwa_resources":next((extraction.features.get(k) for k,_ in X.WUWA_RESOURCES if extraction.features.get(k) is not None),None)}
+        acquired=CJ.now().isoformat()
+        extraction.features["_introduction"]={"complete":bool(title),"source":"detail","acquired_at":acquired,"reused":False}
+        extraction.features["_field_sources"]={key:{"source":"detail","acquired_at":acquired}
+            for key,value in {**attributes,**fields,**{k:v for k,v in extraction.features.items() if not k.startswith("_")}}.items() if value is not None}
+        extraction.features["_public_text"]={"acquired_at":acquired,"source":"detail",
+            "field_states":{key:"obtained" if values.get(key) is not None else "parse_failed"
+                if re.search(pattern,product_text) else "unreported" for key,pattern in labels.items()}}
     if game_id == 10302:
         from . import exploration as E
         maps = E.parse_html(html)
@@ -549,12 +603,18 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
             "snapshot_round": payload.get("snapshot_round"),
             "backfill": backfill,
             "note": "前端 B：读取已加载详情 DOM，回填对应列表轮次", **fields}
+    if payload.get("batch_id"):
+        from .evidence import compact
+        html = compact(html, page_type="detail")
+        meta["content_hash"] = hashlib.sha256(html.encode()).hexdigest()
+        meta["batch_id"] = payload["batch_id"]
     _write_raw(raw_dir, f"detail_{listing_id}", html=html, meta=meta)
 
     entry = {"listing_id": listing_id, "viewers_masked": fields["viewers_masked"],
              "favorites_cnt": fields["favorites_cnt"], "attributes": attributes,
              "features": extraction.features, "snapshot_at": snapshot_at, "game_id": game_id,
-             "backfill": backfill, "title": title, "retry_token": payload.get("retry_token")}
+             "backfill": backfill, "title": title, "retry_token": payload.get("retry_token"),
+             "batch": payload if payload.get("batch_id") else None}
     updated = _apply_detail(state, entry)
     # 返回合并后的实际状态；本次未公示不能遮盖已保存的数量/精炼。
     weapon_features, weapon_count = extraction.features, attributes.get("five_star_weapons")
@@ -603,6 +663,109 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
     return 200, ack
 
 
+def _record_batch_detail(conn, entry):
+    payload = entry["batch"]
+    introduction = entry.get("features", {}).get("_introduction", {})
+    text_complete = bool(entry.get("title")) and introduction.get("complete", True)
+    batch=CJ.get(conn,payload)
+    missing,valuation_ready=CJ.quality(conn,entry["listing_id"],batch["config"],entry.get("missing", []))
+    entry["valuation_ready"]=valuation_ready
+    if not text_complete:
+        missing.append({"key": "introduction", "reason": "完整介绍尚未核验"})
+    entry["missing"] = missing
+    conn.execute("UPDATE collection_batch_item SET text_complete=?,complete=?,missing_json=? WHERE batch_id=? AND listing_id=?",
+                 [text_complete, not missing, CC.encode(missing), payload["batch_id"], entry["listing_id"]])
+    if text_complete and not introduction.get("reused"):
+        CJ.observe(conn, payload, entry["listing_id"], "text", {"source": introduction.get("source", "detail"),
+                   "content_hash": hashlib.sha256(entry["title"].encode()).hexdigest()},
+                   acquired_at=introduction.get("acquired_at"))
+
+
+def _ingest_text(state, payload):
+    items = payload.get("items")
+    if not isinstance(items, list) or len(items) > CJ.BLOCK_SIZE:
+        raise ValueError("invalid-text-items")
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("invalid-text-item")
+        listing_id, title = item.get("id"), item.get("title")
+        identity = {**payload, "listing_id": listing_id, "snapshot_round": item.get("snapshot_round"),
+                    "url": item.get("url")}
+        batch = CJ.validate_ingest(state, identity, detail=True)
+        if not isinstance(title, str) or not 6 <= len(title) <= 50000 or item.get("source") not in ("list-response", "title-api", "detail"):
+            raise ValueError("invalid-text-content")
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            old = CC.current_data(conn, listing_id)
+            baseline = conn.execute("SELECT list_baseline FROM collection_listing_state WHERE listing_id=?", [listing_id]).fetchone()
+        prefix = (json.loads(baseline[0]).get("title") if baseline and baseline[0] else None) or old.get("title", "")
+        normal = lambda value: re.sub(r"[^\w]", "", value or "")
+        if len(normal(prefix)) >= 24 and not normal(title).startswith(normal(prefix)):
+            raise ValueError("text-identity-mismatch")
+        if len(prefix) >= 159 and len(normal(title)) <= len(normal(prefix)) and not re.search(r"详情看图|官方截图", title):
+            raise ValueError("incomplete-text")
+        try:
+            acquired = _dt.datetime.fromisoformat(item["acquired_at"])
+            if acquired.tzinfo is None or acquired > CJ.now() + _dt.timedelta(minutes=5):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("invalid-text-time") from None
+        reused = item.get("reused") is True
+        previous_introduction=json.loads(old.get("extracted_features") or "{}").get("_introduction",{})
+        previous_time=previous_introduction.get("acquired_at")
+        if previous_time and acquired<_dt.datetime.fromisoformat(previous_time) and old.get("title")!=title:
+            raise ValueError("stale-text-response")
+        if reused:
+            # 历史来源时间由网关缓存取，不相信客户端伪造reuse和时间。
+            with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+                cached = conn.execute("SELECT title,CAST(acquired_at AS VARCHAR),source FROM listing_text_cache WHERE game_id=? AND listing_id=?",
+                                      [batch["game_id"], listing_id]).fetchone()
+            if cached:
+                cached = (cached[0],_dt.datetime.fromisoformat(cached[1]),cached[2])
+            if batch["config"].get("force_text_refresh") or not cached or cached[0] != title or cached[2]!=item["source"] or CJ.now() - cached[1] >= _dt.timedelta(minutes=batch["config"].get("text_cache_ttl_minutes", 10)):
+                raise ValueError("stale-text-cache")
+            acquired = cached[1]
+        # 同批同一内容/来源/时间的传输重试不写修订、不推进导出代次。
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            registered=conn.execute("SELECT text_complete,missing_json FROM collection_batch_item WHERE batch_id=? AND listing_id=?",[payload["batch_id"],listing_id]).fetchone()
+            if registered and registered[0] and old.get("title")==title and previous_time==acquired.isoformat() \
+                    and previous_introduction.get("source")==item["source"] and previous_introduction.get("reused",False)==reused:
+                missing,valuation_ready=CJ.quality(conn,listing_id,batch["config"],json.loads(registered[1] or "[]"))
+                results.append({"id":listing_id,"missing":missing,"complete":not missing,"valuation_fields_ready":valuation_ready,
+                    "text_complete":True,"acquired_at":acquired.isoformat(),"reused":reused,"duplicate":True})
+                continue
+        extraction = X.extract_listing(X.seed_keywords(game_id=batch["game_id"]), listing_id=listing_id, title=title, card_fields={})
+        # 仅从已取得的介绍抽取；不伪装详情页已采齐，也不宣告未公示的详情独有字段。
+        from bs4 import BeautifulSoup
+        fragment = BeautifulSoup("<div class='product-detail'><h1 data-product-title='true'></h1></div>", "html.parser")
+        fragment.h1.string = title
+        _, attributes = P.parse_detail_attributes(str(fragment))
+        attributes.update(P.parse_detail_public_fields(str(fragment)))
+        extraction.features["_introduction"] = {"complete": True, "source": item["source"],
+                                               "acquired_at": acquired.isoformat(), "reused": reused}
+        extraction.features["_field_sources"]={key:{"source":item["source"],"acquired_at":acquired.isoformat(),"reused":reused}
+            for key,value in {**attributes,**{k:v for k,v in extraction.features.items() if not k.startswith("_")}}.items() if value is not None}
+        entry = {"listing_id": listing_id, "snapshot_at": _dt.datetime.fromisoformat(item["snapshot_round"]),
+                 "game_id": batch["game_id"], "title": title, "attributes": attributes,
+                 "features": extraction.features, "batch": identity}
+        updated = _apply_detail(state, entry)
+        if not updated:
+            raise ValueError("snapshot-round-not-found")
+        if not reused:
+            from .evidence import compact
+            evidence = compact(str(fragment), page_type="detail")
+            stamp = _dt.datetime.now()
+            run_id = new_run_id(batch["task_id"] + "-text", now=stamp)
+            _write_raw(raw_dir_for(state.settings, batch["task_id"], run_id, now=stamp), "text_" + listing_id,
+                       html=evidence, meta={"listing_id": listing_id, "game_id": batch["game_id"], "batch_id": payload["batch_id"],
+                        "source": item["source"], "collected_at": acquired.isoformat(), "parser_version": P.PARSER_VERSION,
+                        "content_hash": hashlib.sha256(evidence.encode()).hexdigest(), "page_type": "text"})
+        results.append({"id": listing_id, "missing": entry.get("missing", []), "complete": not entry.get("missing", []),
+                        "valuation_fields_ready":entry.get("valuation_ready",False),
+                        "text_complete": True, "acquired_at": acquired.isoformat(), "reused": reused})
+    return 200, {"ok": True, "items": results}
+
+
 def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
     """把详情字段回填该 listing 最近一轮快照；无快照则挂起 pending（等列表批次合并）。"""
     with PL.run_lock(state.settings):
@@ -621,7 +784,7 @@ def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
                         viewers_masked=entry.get("viewers_masked"),
                         favorites_cnt=entry.get("favorites_cnt"),
                         attributes=entry.get("attributes"), features=entry.get("features"),
-                        snapshot_at=entry.get("snapshot_at"))
+                        snapshot_at=entry.get("snapshot_at"), public_fields=bool(entry.get("batch")))
                     if updated:
                         if entry.get("title"):
                             conn.execute("UPDATE dim_listing SET title=? WHERE listing_id=?",
@@ -631,13 +794,20 @@ def _apply_detail(state: GatewayState, entry: dict[str, Any]) -> int:
                         if entry.get("retry_token"):
                             CC.finish_retry(conn, entry["listing_id"], entry["retry_token"],
                                             "incomplete" if entry["missing"] else "complete")
+                        if entry.get("batch"):
+                            _record_batch_detail(conn, entry)
+                            EQ.dirty(conn, entry["game_id"])
                     conn.execute("COMMIT")
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
             if entry.get("backfill") and updated:
                 entry["missing"] = (entry.get("backfill_result") or {}).get("missing", [])
-            if updated:
+            if updated and entry.get("batch"):
+                entry["analysis_sync"] = {"ok": True, "pending": True, "game_id": entry["game_id"],
+                                          "message": "数据已入库，导出待同步"}
+                state.exports.schedule()
+            elif updated:
                 from .analysis import sync_game_csv
                 game = conn.execute("SELECT game_id FROM dim_listing WHERE listing_id = ?",
                                     [entry["listing_id"]]).fetchone()
@@ -694,8 +864,11 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
 
     # 目标采集：按 URL 的 game_id 路由到勾选的目标任务；未勾选的游戏直接拒收
     task: Task | None = None
+    if payload.get("batch_id"):
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            task = state.task_by_id(CJ.get(conn,payload)["task_id"])
     m = _LIST_URL_RE.search(url)
-    if m:
+    if m and task is None:
         task = state.match_task(int(m.group(1)), int(m.group(2)))
         if task is None:
             return _target_not_selected(state, int(m.group(1)))
@@ -798,11 +971,30 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
             conn = db.connect(state.settings.paths.db)
             try:
                 decisions = [CC.decision(conn, observations.get(r.listing_id, r.card), game_id=task.game_id) for r in listings]
+                batch_config = CJ.get(conn, payload)["config"] if payload.get("batch_id") else None
+                if batch_config and batch_config["purpose"] == "price_refresh":
+                    for d in decisions:
+                        old = CC.current_data(conn, d["id"])
+                        if old and old["game_id"] == task.game_id:
+                            d["kind"] = "changed" if d["kind"] == "changed" else "refresh"
                 kinds = {d["id"]: d["kind"] for d in decisions}
-                accepted = [r for r in listings if kinds[r.listing_id] in ("new", "changed")]
+                accepted = [r for r in listings if kinds[r.listing_id] in ("new", "changed", "refresh")]
+                if batch_config and batch_config["purpose"] == "price_refresh":
+                    accepted=[r for r in accepted if CC.current_data(conn,r.listing_id)]
+                if batch_config and batch_config["purpose"] == "detail_enrich":
+                    accepted = []  # 保留原快照轮次，仅补公开文字；不额外伪造价格观察。
+                if payload.get("batch_id"):
+                    # 同批回执重传不再次覆盖快照/导出，也不把new变为retry丢失计数。
+                    done = {r[0] for r in conn.execute("SELECT listing_id FROM collection_batch_item WHERE batch_id=? AND price_confirmed=TRUE", [payload["batch_id"]]).fetchall()}
+                    accepted = [r for r in accepted if r.listing_id not in done]
                 conn.execute("BEGIN TRANSACTION")
                 try:
                     if accepted:
+                        if payload.get("batch_id"):
+                            from .evidence import compact
+                            html = compact(html, page_type="list")
+                            meta["content_hash"] = hashlib.sha256(html.encode()).hexdigest()
+                            meta["batch_id"] = payload["batch_id"]
                         dump = _write_raw(raw_dir, f"list_p{page_no:02d}", html=html, meta=meta)
                         page_res.raw = dump
                     for row in accepted:
@@ -817,21 +1009,33 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                         CC.complete_retry_state(conn, row.listing_id)
                     for d in decisions:
                         # 基线只有真正写入或旧库首次观察才推进；重试不得擦除变更信号。
-                        if d["kind"] in ("new", "changed", "skip", "manual"):
+                        if d["kind"] in ("new", "changed", "refresh", "skip", "manual"):
                             CC.save_baseline(conn, d["id"], d["baseline"])
+                    if payload.get("batch_id"):
+                        for d in decisions:
+                            if any(r.listing_id == d["id"] for r in accepted):
+                                d["snapshot_round"] = round_ts.isoformat(timespec="seconds")
+                        CJ.register(conn, payload, decisions)
+                        for row in accepted:
+                            CJ.observe(conn, payload, row.listing_id, "price", {"price_yuan": row.card.fields.get("price_yuan"), "source": "list", "snapshot_round": round_ts.isoformat(timespec="seconds")})
+                        if accepted:
+                            EQ.dirty(conn, task.game_id)
                     conn.execute("COMMIT")
                 except Exception:
                     conn.execute("ROLLBACK")
                     raise
                 from .analysis import sync_game_csv, csv_sync_status
                 previous_sync = csv_sync_status(state.settings).get(str(task.game_id))
-                if accepted or previous_sync and not previous_sync.get("ok"):
+                if payload.get("batch_id"):
+                    load_stats.analysis_sync = {"ok": True, "pending": True, "game_id": task.game_id}
+                    state.exports.schedule()
+                elif accepted or previous_sync and not previous_sync.get("ok"):
                     try:
                         load_stats.analysis_sync = sync_game_csv(state.settings, conn, game_id=task.game_id)
                     except Exception as exc:
                         load_stats.analysis_sync = {"ok": False, "game_id": task.game_id, "error": str(exc)[:300]}
                 for d in decisions:
-                    d["snapshot_round"] = (round_ts.isoformat(timespec="seconds") if d["kind"] in ("new", "changed")
+                    d["snapshot_round"] = (round_ts.isoformat(timespec="seconds") if any(r.listing_id == d["id"] for r in accepted)
                                            else d["snapshot_round"])
                     d.pop("baseline", None)
                     if d["kind"] in ("new", "changed"):
@@ -878,7 +1082,7 @@ def _ingest_cards(state: GatewayState, payload: dict[str, Any]) -> tuple[int, di
                  "snapshots_inserted": load_stats.snapshots_inserted,
                  "new_listings": load_stats.new_listings,
                  "items": decisions,
-                 "accepted_ids": [d["id"] for d in decisions if d["kind"] in ("new", "changed")],
+                 "accepted_ids": [r.listing_id for r in listings],
                  "updated_ids": [d["id"] for d in decisions if d["kind"] == "changed"],
                  "skipped_ids": [d["id"] for d in decisions if d["kind"] in ("skip", "manual")],
                  "retry_ids": [d["id"] for d in decisions if d["kind"] == "retry"],
@@ -897,14 +1101,90 @@ def handle_ingest(state: GatewayState, path: str, body: bytes) -> tuple[int, dic
         return 400, {"ok": False, "error": "invalid-json"}
     if not isinstance(payload, dict):
         return 400, {"ok": False, "error": "body-must-be-object"}
+    if path in ("/collection/batch/flush","/collection/batch/retry-local"):
+        try:
+            with state.lock:
+                ensure_collection(state)
+            with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+                if path.endswith("retry-local"):
+                    if not isinstance(payload.get("batch_id"),str) or not re.fullmatch(r"[0-9a-f]{32}",payload["batch_id"]):
+                        raise ValueError("invalid-batch-id")
+                    row=conn.execute("SELECT claim_epoch,status FROM collection_batch WHERE batch_id=?",[payload["batch_id"]]).fetchone()
+                    if not row or row[1] in ("running","waiting_verification"):
+                        raise ValueError("batch-not-terminal")
+                    payload={**payload,"protocol_version":CJ.VERSION,"claim_epoch":row[0]}
+                batch = CJ.get(conn, payload, terminal=True)
+            result = state.exports.flush(game_id=batch["game_id"])
+            if result["ok"] and batch["status"] not in ("running", "waiting_verification"):
+                result["handoff"] = _batch_handoff(state, payload)
+            return 200, result
+        except (ValueError, TypeError) as exc:
+            return 409, {"ok": False, "error": str(exc)}
+    started = time.perf_counter()
     with state.lock:
+        try:
+            if path in COLLECTION_PROTOCOL_PATHS:
+                ensure_collection(state)
+                if path == "/collection/batch/create":
+                    return 200, CJ.create(state, payload)
+                if path == "/collection/batch/clear-hold":
+                    return 200, CJ.clear_hold(state)
+                if path == "/collection/batch/cancel-local":
+                    return 200, CJ.cancel_local(state,payload)
+                if path == "/collection/monitor/claim":
+                    result=state.monitor.claim()
+                    return (200 if result["ok"] else 409),result
+                if path == "/collection/batch/progress":
+                    return 200, CJ.progress(state, payload)
+                if path == "/collection/batch/access":
+                    result = CJ.access(state, payload)
+                    return (200 if result["ok"] else 409), result
+                if path in ("/collection/text-cache/query", "/collection/text-cache/store"):
+                    return 200, CJ.text_cache(state, payload, store=path.endswith("store"))
+                if path == "/collection/text":
+                    return _ingest_text(state, payload)
+            if payload.get("batch_id"):
+                ensure_collection(state)
+                batch = CJ.validate_ingest(state, payload, detail=path == "/ingest/detail") if path in ("/ingest/cards", "/ingest/detail") else None
+        except (ValueError, TypeError, KeyError) as exc:
+            return 409, {"ok": False, "error": str(exc)}
         if path in ("/collection/check", "/collection/retry"):
             return handle_collection(state, path, payload)
         if path == "/ingest/cards":
-            return _ingest_cards(state, payload)
+            status, result = _ingest_cards(state, payload)
+            if payload.get("batch_id"):
+                result["gateway_duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
+            return status, result
         if path == "/ingest/detail":
-            return _ingest_detail(state, payload)
+            status, result = _ingest_detail(state, payload)
+            if payload.get("batch_id"):
+                result["gateway_duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
+            return status, result
     return 404, {"ok": False, "error": f"unknown-path: {path}"}
+
+
+def _batch_handoff(state, payload):
+    """每批一次刷新现有分析视图；估值模型发布保持独立契约，不自动重训。"""
+    with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+        batch=CJ.get(conn,payload,terminal=True)
+        record=conn.execute("SELECT handoff_json,checkpoint_json FROM collection_batch WHERE batch_id=?",[payload["batch_id"]]).fetchone()
+        stored=record[0]
+        if stored:
+            return json.loads(stored)
+        cutoff=json.loads(record[1] or "{}").get("cutoff_generation",0)
+        exported=conn.execute("SELECT exported_generation FROM collection_export_state WHERE game_id=?",[batch["game_id"]]).fetchone()
+        if cutoff and (not exported or exported[0]<cutoff):
+            return {"ok":False,"error":"export-before-cutoff","message":"等待本批数据导出"}
+        try:
+            from .analysis import prepare_analysis
+            result=prepare_analysis(state.settings,conn=conn)
+            handoff={"ok":True,"at":CJ.now().isoformat(),"batch_id":payload["batch_id"],
+                     "game_id":batch["game_id"],"cutoff_generation":cutoff,"view_rows":result["view_rows"],"quality":result["quality"],
+                     "valuation_publication":"pending-existing-publisher"}
+            conn.execute("UPDATE collection_batch SET handoff_json=? WHERE batch_id=?",[CC.encode(handoff),payload["batch_id"]])
+            return handoff
+        except Exception as exc:
+            return {"ok":False,"error":type(exc).__name__,"message":"数据已入库，分析交接待重试"}
 
 
 def ensure_collection(state: GatewayState) -> None:
@@ -912,6 +1192,7 @@ def ensure_collection(state: GatewayState) -> None:
     if state.collection_db != path:
         with PL.run_lock(state.settings):
             CC.upgrade(state.settings)
+            CJ.ensure(state.settings)
         state.collection_db = path
 
 
@@ -944,18 +1225,32 @@ def handle_collection(state: GatewayState, path: str, payload: dict) -> tuple[in
         if not isinstance(html, str) or not html.strip() or not isinstance(url, str):
             raise ValueError("invalid-candidates")
         parts = urlsplit(url)
-        match = re.fullmatch(r"/buy/(\d+)/(\d+)/?", parts.path)
+        match = re.fullmatch(r"/buy/(\d+)(?:/(\d+))?/?", parts.path)
         if parts.scheme != "https" or parts.netloc != "www.pxb7.com" or not match:
             raise ValueError("invalid-source-url")
-        task = state.match_task(int(match[1]), int(match[2]))
+        if payload.get("batch_id"):
+            with PL.run_lock(state.settings),db.connect(state.settings.paths.db) as conn:
+                task=state.task_by_id(CJ.get(conn,payload)["task_id"])
+        else:
+            task = state.match_task(int(match[1]), int(match[2] or 1))
         if task is None:
             return _target_not_selected(state, int(match[1]))
         if _reject_risk_page(html):
             return 422, {"ok": False, "error": "risk-page"}
         parsed = CC.parse_candidates(html, url)
+        if payload.get("batch_id"):
+            CJ.validate_ingest(state, payload,scan=True)
+            wanted = set(payload["selected_ids"])
+            parsed.cards = [card for card in parsed.cards if card.listing_id in wanted]
         decisions = []
         seen = set()
         with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            if payload.get("batch_id"):
+                batch=CJ.get(conn,payload)
+                scanned={r[0] for r in conn.execute("SELECT listing_id FROM collection_scanned WHERE batch_id=?",[payload["batch_id"]]).fetchall()}
+                incoming={c.listing_id for c in parsed.cards if c.parse_ok and c.listing_id}
+                if len(scanned|incoming)>batch["config"]["scan_budget"]:
+                    raise ValueError("scan-budget-exhausted")
             for card in parsed.cards:
                 if not card.parse_ok or not card.listing_id or card.listing_id in seen:
                     continue
@@ -963,6 +1258,13 @@ def handle_collection(state: GatewayState, path: str, payload: dict) -> tuple[in
                 if not CC.ID_RE.fullmatch(card.listing_id):
                     continue
                 result = CC.decision(conn, card, game_id=task.game_id)
+                if payload.get("batch_id"):
+                    old = CC.current_data(conn, card.listing_id)
+                    result["existing"] = bool(old and old["game_id"] == task.game_id)
+                    batch=CJ.get(conn,payload)
+                    if result["existing"]:
+                        result["missing"],result["valuation_ready"]=CJ.quality(conn,card.listing_id,batch["config"],result["missing"])
+                    conn.execute("INSERT INTO collection_scanned VALUES (?,?,?) ON CONFLICT DO NOTHING",[payload["batch_id"],card.listing_id,result["kind"]])
                 decisions.append({k: v for k, v in result.items() if k != "baseline"})
                 # 旧库首次遇见只建立列表来源基线，不虚构旧标题。
                 if result["kind"] != "new" and not conn.execute(
@@ -1264,6 +1566,12 @@ def _apply_config_paths(state: GatewayState, config: Mapping[str, Any]) -> None:
     恢复默认（paths={}）时不能只清空覆写文件——必须从 settings.yaml 重新加载，
     否则运行中的网关会停留在旧的覆写路径上。任一步失败即回滚覆写文件，状态不变。"""
     overrides = {key: Path(value) for key, value in (config.get("paths") or {}).items()}
+    if state.collection_db:
+        with PL.run_lock(state.settings), db.connect(state.settings.paths.db) as conn:
+            if conn.execute("SELECT count(*) FROM collection_batch WHERE status IN ('running','waiting_verification','needs_reconcile')").fetchone()[0]:
+                raise GatewayError("请先结束或取消采集批次，再改变数据路径")
+        if not state.exports.flush()["ok"]:
+            raise GatewayError("旧位置导出仍待重试，请先完成本地同步再改变路径")
     previous = cfgmod.load_path_overrides()
     try:
         prospective = cfgmod.apply_path_overrides(state.settings, overrides)
@@ -1289,10 +1597,19 @@ def _apply_config_paths(state: GatewayState, config: Mapping[str, Any]) -> None:
             db.init_db(new_db, tasks=[t.as_row() for t in state.tasks if t.enabled])
             with db.connect(new_db) as conn:
                 db.upsert_dim_keywords(conn, X.seed_db_rows())
+        # 全部升级成功后才切换运行状态；备份或迁移失败保留原位置。
+        with PL.run_lock(new_settings):
+            CC.upgrade(new_settings)
+            CJ.ensure(new_settings)
     except Exception as exc:
         _restore_override_file()
         raise GatewayError(f"新数据库初始化失败：{type(exc).__name__}: {exc}") from exc
     state.settings = new_settings
+    state.exports.close()
+    state.exports = EQ.ExportQueue(new_settings)
+    state.collection_db = str(new_db)
+    if state.exports.pending():
+        state.exports.schedule()
 
 
 def handle_config_post(state: GatewayState, raw: Any) -> tuple[int, dict[str, Any]]:
@@ -1481,6 +1798,8 @@ def build_stats_payload(state: GatewayState) -> dict[str, Any]:
         "script": script_info(state),
         "pending_details": pending,
         "csv_sync_status": csv_sync_status(state.settings),
+        "collection": CJ.status(state.settings),
+        "capabilities": {"collection_protocol":CJ.VERSION,"block_size":CJ.BLOCK_SIZE},
         "risk": _risk_summary(state.settings),
         "db": db_payload,
     }
@@ -1552,6 +1871,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             record_script_version(self.state, version, channel=channel)  # 插件自报版本
             with self.state.lock:
                 self._send(200, {"ok": True, "config": dict(self.state.config),
+                                 "capabilities": {"collection_protocol": CJ.VERSION, "block_size": CJ.BLOCK_SIZE},
                                  "targets": targets_payload(self.state),
                                  "script": script_info(self.state)})
         elif path == "/stats":
@@ -1658,10 +1978,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._send(*handle_config_post(self.state, raw))
             return
-        if path not in ("/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry"):
+        if path not in {"/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry", *COLLECTION_PROTOCOL_PATHS}:
             self._send(404, {"ok": False, "error": "unknown-path"})
             return
         origin = self._origin()
+        if path in COLLECTION_PROTOCOL_PATHS and not origin_allowed_local(origin):
+            self._send(403,{"ok":False,"error":"extension-or-local-origin-required"})
+            return
         if not origin_allowed(origin):
             self._send(403, {"ok": False, "error": f"origin-not-allowed: {origin}"})
             return
@@ -1722,10 +2045,16 @@ def serve(settings: Settings, *, task: Task | None = None,
           f"{', '.join(state.effective_task_ids())}；DB：{settings.paths.db}")
     print("[gateway] 等待插件推送 /ingest/cards 与 /ingest/detail … Ctrl+C 退出")
     try:
+        ensure_collection(state)
+        if state.exports.pending():
+            state.exports.schedule()
+        state.monitor.start()
         server.serve_forever()
     except KeyboardInterrupt:
         print("[gateway] 已退出")
     finally:
         server.server_close()
+        state.monitor.close()
+        state.exports.close()
         if log_handle is not None:
             log_handle.close()
