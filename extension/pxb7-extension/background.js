@@ -13,9 +13,9 @@
 const GATEWAY = "http://127.0.0.1:8765";
 
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
-const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry",
+const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/ingest/detail-data", "/collection/check", "/collection/retry",
   "/collection/text", "/collection/text-cache/query", "/collection/text-cache/store"]);
-importScripts("collection.js", "slider-input.js");
+importScripts("detail-pool.js", "collection.js", "slider-input.js");
 // 详情队列的间隔来自网关 /config（deps.getConfig）；列表模式不经此路径，两者互不共用。
 const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)),
   { getConfig: async () => {

@@ -200,13 +200,15 @@ function renderProgress(p) {
   $("progress-count").textContent = `${completed}/${p.requested} ${p.mode === "backfill" ? "张" : p.purpose === "price_refresh" ? "个价格观察" : p.purpose === "detail_enrich" ? "个补齐任务" : "个新账号"}`;
   $("collect-progress").value = Math.min(100, Math.round(completed / Math.max(1, p.requested) * 100));
   $("progress-phase").textContent = p.phase;
-  const seconds = Math.max(0, Math.round(((busy ? Date.now() : p.updatedAt) - p.startedAt) / 1000));
+  const seconds = Math.max(0, Math.round(((p.completedAt || (busy ? Date.now() : p.updatedAt)) - p.startedAt) / 1000));
   $("progress-detail").textContent = `入库 ${p.succeeded} · 失败 ${p.failed} · ${seconds} 秒`
     + (p.incomplete ? ` · 待补齐 ${p.incomplete}` : "");
   if (p.mode !== "backfill") $("progress-detail").textContent +=
     ` · 更新 ${p.updated || 0} · 重复跳过 ${p.duplicates || 0} · 自动重试 ${p.retried || 0} · 待补录 ${p.manual_pending || 0}`;
   if (p.batch) $("progress-detail").textContent += ` · 扫描 ${p.scanned || 0} · 价格 ${p.prices || 0} · 完整文字 ${p.batch_counts?.text_complete || p.text_complete || 0} · 回退 ${p.fallback || 0} · 执行块 ${p.blocks || 0}`
     + (p.export && !p.export.ok ? " · 数据已入库，导出待重试" : p.export ? " · 导出已同步" : " · 导出等待中");
+  if(p.concurrency) $("progress-detail").textContent += ` · 完整入库 ${p.complete_count||0} · 在途 ${p.in_flight||0} · 并发 ${p.concurrency} · 响应 ${p.response_complete||0} · DOM回退 ${p.dom_fallback||0}`;
+  if(p.timings) $("progress-detail").textContent += ` · 发现 ${(p.timings.discovery_ms/1000).toFixed(1)}s · 请求累计 ${(p.timings.request_ms/1000).toFixed(1)}s · 解析累计 ${(p.timings.parse_ms/1000||0).toFixed(1)}s · 入库累计 ${(p.timings.commit_ms/1000||0).toFixed(1)}s · 提交累计 ${(p.timings.submit_ms/1000).toFixed(1)}s · 验证 ${(p.timings.verification_ms/1000).toFixed(1)}s`;
   if (p.export?.handoff) $("progress-detail").textContent += p.export.handoff.ok ? " · 趋势视图已更新（估值发布待交接）" : " · 分析交接待重试";
   $("cancel-collect").disabled = !busy;
   $("grab").disabled = busy || bfStarting;
@@ -255,6 +257,8 @@ async function refresh() {
   if (settingsDirty) return;
   const c = s.config || {};
   $("c-mode").value = c.collection_mode || "list";
+  $("c-detail-transport").value = c.detail_transport || "page";
+  $("c-detail-concurrency").value = String(c.detail_concurrency ?? 0);
   $("c-purpose").value = c.purpose || "discover";
   $("c-target").value = c.target_count || 0;
   $("c-ids").value = (c.selected_listing_ids || []).join(", ");
@@ -283,6 +287,8 @@ async function saveSettings() {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       collection_mode: $("c-mode").value,
+      detail_transport: $("c-detail-transport").value,
+      detail_concurrency: Number($("c-detail-concurrency").value),
     purpose:$("c-purpose").value, target_count:Number($("c-target").value),
     selected_listing_ids:$("c-ids").value.trim() ? $("c-ids").value.trim().split(/[\s,，]+/) : [],
     scan_budget:Number($("c-scan").value), max_scan_rounds:Number($("c-rounds").value),

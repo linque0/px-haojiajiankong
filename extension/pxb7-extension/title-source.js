@@ -5,6 +5,19 @@
   const ENDPOINT = API + "/api/search/product/selectTitleByCode";
   const nativeFetch = win.fetch.bind(win);
   const cache = new Map();
+  const details = new Map();
+  function observeDetail(data) {
+    const value=win.PXB7_DETAIL_DATA?.normalize(data);
+    if (value) { details.set(value.product.id,value); if(details.size>16)details.delete(details.keys().next().value); }
+  }
+  function detailUrl(url) {
+    try {const u=new URL(url,win.location.href);return u.origin===API && u.pathname==="/api/product/web/product/detailPost";}catch(_){return false;}
+  }
+  win.addEventListener("pxb7-detail-request",event=>{
+    try {const q=JSON.parse(event.detail);if(typeof q.token!=="string" || q.token.length>100 || !/^\d{6,24}$/.test(q.id))return;
+      win.dispatchEvent(new win.CustomEvent("pxb7-detail-result",{detail:JSON.stringify({token:q.token,id:q.id,value:details.get(q.id) || null})}));
+    }catch(_){}
+  });
   let requestHeaders = null, active = false, nextRequest = 0, requestsInBatch = 0;
   // 全文请求间隔（毫秒）：0–10000（0–10 秒，0.1 秒步进由设置界面保证）；
   // 未提供/非法回落默认 3000；0 = 用户显式不等待，不得当缺省吞掉。
@@ -48,9 +61,9 @@
   win.fetch = function (input, init) {
     const promise = nativeFetch(input, init);
     const url = typeof input === "string" ? input : input?.url;
-    if (allowed(url)) promise.then(response => {
+    if (allowed(url) || detailUrl(url)) promise.then(response => {
       if (response.ok && /json/i.test(response.headers.get("content-type") || "")) {
-        response.clone().json().then(data => observe(data, init?.headers || input?.headers)).catch(() => {});
+        response.clone().json().then(data => detailUrl(url) ? observeDetail(data) : observe(data, init?.headers || input?.headers)).catch(() => {});
       }
     }, () => {});
     return promise;
@@ -70,10 +83,12 @@
     };
     proto.send = function (...args) {
       const info = requests.get(this);
-      if (info && allowed(info.url)) this.addEventListener("load", () => {
+      if (info && (allowed(info.url) || detailUrl(info.url))) this.addEventListener("load", () => {
         try {
-          if (this.status >= 200 && this.status < 300) observe(
-            this.responseType === "json" ? this.response : JSON.parse(this.responseText), info.headers);
+          if (this.status >= 200 && this.status < 300) {
+            const data=this.responseType === "json" ? this.response : JSON.parse(this.responseText);
+            if(detailUrl(info.url))observeDetail(data);else observe(data,info.headers);
+          }
         } catch (_) { /* 非 JSON 忽略 */ }
       }, {once:true});
       return send.apply(this, args);

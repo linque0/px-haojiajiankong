@@ -39,7 +39,9 @@
       try {
         const response = await deps.batchProgress({...batchIdentity(task), status:task.status, reason:task.phase,
           checkpoint:{phase:task.phase, processed:task.processed, current_id:task.currentId,
-            scanned:task.scanned || 0, pending_ids:(task.items || []).slice(task.processed).map(i=>i.id),
+            scanned:task.scanned || 0, timings:task.timings,elapsed_ms:task.elapsed_ms,
+            concurrency:task.concurrency,complete_count:task.complete_count,in_flight:task.in_flight,
+            dom_fallback:task.dom_fallback,response_complete:task.response_complete,verification_count:task.verification_count, pending_ids:(task.slots ? (task.items || []).filter(i=>!["complete","incomplete","failed","skipped"].includes(i.state)) : (task.items || []).slice(task.processed)).map(i=>i.id),
             events:(task.events || []).slice(-200),diagnostics:(task.diagnostics || []).slice(-200)}});
         if (response?.data?.counts) task.batch_counts = response.data.counts;
         if (response?.data?.status && response.data.status!==task.status) {
@@ -55,9 +57,11 @@
       item.retryToken = token;
       return deps.retry({id:item.id, token, action, snapshot_round:item.snapshot_round || task.round});
     }
+    const pool=(root.PXB7_DETAIL_POOL || (typeof require!=="undefined" ? require("./detail-pool.js"):null))?.create({chrome,save,view,finish,reportBatch,ingest,batchIdentity,retryAction,
+      access:deps.batchAccess,pause,samePage,alarm:ALARM});
     function view(task) {
       if (!task) return null;
-      const {items, sourceTab, returnTab, workerTab, nonce, round, newIds, ...progress} = task;
+      const {items, sourceTab, returnTab, workerTab, slots, nonce, round, newIds, ...progress} = task;
       return progress;
     }
     async function finish(task, status, message, keepTab = false) {
@@ -66,6 +70,16 @@
         try {await retryAction(current, "cancelled", task);} catch (_) { /* 网关不可达时保留已使用的资格 */ }
       }
       task.status = status; task.phase = message;
+      if(["done","partial","error","cancelled","paused"].includes(status)){task.completedAt=Date.now();task.elapsed_ms=task.completedAt-task.startedAt;}
+      if(task.slots){
+        for(const slot of task.slots){
+          const item=task.items[slot.index];
+          if(item?.retryClaimed && item.state!=="complete"){try{await retryAction(item,"cancelled",task);}catch(_){}}
+          try{await chrome.tabs.sendMessage(slot.tabId,{type:"collect-cancel",taskId:task.id});}catch(_){}
+          if(!keepTab){try{await chrome.tabs.remove(slot.tabId);}catch(_){}}
+        }
+        task.workerTab=null;task.in_flight=0;
+      }
       if (task.batch) await reportBatch(task);
       if (status==="done" && task.status==="partial") task.phase += "；网关核验仍有未完成项";
       status=task.status;
@@ -190,6 +204,7 @@
       return {ok:true, paused:true, nonce:task.nonce, progress:view(task)};
     }
     function ownsVerificationPage(task, sender, reported) {
+      if(task.slots)return pool.owns(task,sender,reported);
       if (task.verification?.tabId !== sender.tab?.id) return false;
       return samePage(sender, task.workerTab ? task.items[task.processed]?.url : task.sourceUrl, reported);
     }
@@ -390,6 +405,7 @@
         task.fallback = items.length;
         task.newIds = task.new_succeeded ? items.filter(item => item.kind === "new").map(item => item.id) : [];
         task.items = items; task.total = items.length; task.round = msg.round;
+        if(task.batch?.config?.detail_transport==="response_auto" && pool && deps.batchAccess)return pool.start(task);
         try {
           const tab = await chrome.tabs.create({url:"about:blank", active:false});
           task.workerTab = tab.id;
@@ -398,6 +414,7 @@
       }),
       context: (sender, msg = {}) => serial(async () => {
         const task = await read();
+        if(active(task) && task.slots){const result=pool.context(task,sender,msg);if(result)return result;}
         if (active(task) && task.batch && !task.workerTab && task.sourceTab===sender.tab?.id) {
           if (!samePage(sender,task.sourceUrl,msg.pageUrl)) return finish(task,"cancelled","源列表地址已变化，已保留数据");
           if (task.prices || task.scanned) {
@@ -423,6 +440,11 @@
       verificationPause: (sender, msg) => serial(async () => {
         const task = await read();
         if (!active(task) || task.id !== msg.taskId) return {ok:false};
+        if(task.slots){
+          const slot=pool.slotFor(task,sender),item=pool.itemFor(task,slot);
+          if(!item || !samePage(sender,item.url,msg.pageUrl) || !slot.verification && slot.nonce!==msg.nonce)return {ok:false};
+          return pool.block(task,slot);
+        }
         const tabId = task.workerTab || task.sourceTab;
         const url = task.workerTab ? task.items[task.processed]?.url : task.sourceUrl;
         if (sender.tab?.id !== tabId || !samePage(sender, url, msg.pageUrl)) return {ok:false};
@@ -432,6 +454,11 @@
       verificationResume: (sender, msg) => serial(async () => {
         const task = await read();
         if (task?.status !== "waiting_verification" || task.id !== msg.taskId || !ownsVerificationPage(task, sender, msg.pageUrl)) return {ok:false};
+        if(task.slots){
+          const slot=pool.slotFor(task,sender);
+          if(slot.nonce!==msg.nonce)return {ok:false,error:"task-changed"};
+          return pool.resume(task,slot);
+        }
         task.status = "running"; task.phase = task.verification.phase;
         (task.events ||= []).push({type:"challenge_cleared",at:Date.now(),id:task.currentId,
           waiting_ms:Date.now()-task.verification.startedAt,intervention:"unknown"});
@@ -445,18 +472,20 @@
         const task = await read();
         if (task?.status !== "waiting_verification" || task.id !== msg.taskId
             || !ownsVerificationPage(task, sender, msg.pageUrl)) return {ok:false, error:"task-changed"};
-        if (task.workerTab && task.nonce !== msg.nonce) return {ok:false, error:"task-changed"};
-        if (task.verification.autoAttempted) return {ok:false, error:"attempt-used"};
+        const event=task.slots ? pool.eventFor(task,sender):task.verification;
+        const nonce=task.slots ? pool.slotFor(task,sender)?.nonce:task.nonce;
+        if (task.workerTab && nonce !== msg.nonce) return {ok:false, error:"task-changed"};
+        if (event.autoAttempted) return {ok:false, error:"attempt-used"};
         // 在输入前持久化，刷新页面/后台重启不会反复操作同一个等待事件。
-        task.verification.autoAttempted = true;
+        event.autoAttempted = true;
         (task.events ||= []).push({type:"input_attempted",at:Date.now(),id:task.currentId});
         await save(task);
-        return {ok:true, startedAt:task.verification.startedAt};
+        return {ok:true, startedAt:event.startedAt};
       }),
       verificationAttemptActive: async (sender, msg, startedAt) => {
         const task = await read();
         return task?.status === "waiting_verification" && task.id === msg.taskId
-          && task.verification.startedAt === startedAt && ownsVerificationPage(task, sender, msg.pageUrl);
+          && (task.slots ? pool.eventFor(task,sender)?.startedAt:task.verification?.startedAt) === startedAt && ownsVerificationPage(task, sender, msg.pageUrl);
       },
       confirmVerification: () => serial(async () => {
         const task = await read();
@@ -467,6 +496,7 @@
       }),
       result: (sender, msg) => serial(async () => {
         const task = await read();
+        if(task?.slots)return pool.result(task,sender,msg);
         if (!running(task) || task.workerTab !== sender.tab?.id || task.id !== msg.taskId || task.nonce !== msg.nonce) return {ok:false, err:"过期详情结果"};
         if (msg.error) return failed(task, String(msg.error).slice(0, 80));
         const item = task.items[task.processed];
@@ -523,11 +553,13 @@
       timeout: () => serial(async () => {
         const task = await read();
         if (!running(task)) return;
+        if(task.slots)return pool.timeout(task);
         if (task.workerTab) return failed(task,"detail-timeout");
         return finish(task,"error","采集长时间无响应，请重新开始");
       }),
       removed: tabId => serial(async () => {
         const task = await read();
+        if(active(task) && task.slots?.some(s=>s.tabId===tabId))return finish(task,"cancelled","快速采集工作标签页关闭；已入库进度保留");
         if (active(task) && (task.workerTab === tabId || (!task.workerTab && task.sourceTab === tabId))) {
           return finish(task,"cancelled","采集标签页已关闭，任务取消");
         }

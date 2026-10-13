@@ -416,6 +416,26 @@
     return null;
   }
 
+  function responseDetail(id) {
+    return new Promise(resolve=>{
+      const token=String(Date.now())+":"+String(Math.random());
+      const receive=e=>{try{const r=JSON.parse(e.detail);if(r.token===token && r.id===id){clearTimeout(timer);window.removeEventListener("pxb7-detail-result",receive);resolve(r.value);}}catch(_){}};
+      const timer=setTimeout(()=>{window.removeEventListener("pxb7-detail-result",receive);resolve(null);},300);
+      window.addEventListener("pxb7-detail-result",receive);
+      window.dispatchEvent(new CustomEvent("pxb7-detail-request",{detail:JSON.stringify({id,token})}));
+    });
+  }
+  async function fastGate(job,pageUrl) {
+    while(!cancelled && location.href===pageUrl) {
+      if(!await waitVerification(pageUrl,job,job.waiting_verification))return false;
+      const context=await bg({type:"detail-context",pageUrl});
+      if(!context.job || context.job.taskId!==job.taskId || context.job.id!==job.id)return false;
+      job.nonce=context.job.nonce;job.waiting_verification=context.job.waiting_verification;
+      if(!context.job.held)return true;
+      show("其他工作页正在处理验证；进度保留",false);await sleep(250);
+    }
+    return false;
+  }
   async function runWorker(job) {
     cancelled = false;
     taskId = job.taskId;
@@ -424,6 +444,22 @@
     const pageUrl = location.href;
     if (!await waitVerification(pageUrl, job, job.waiting_verification)) return;
     while (!cancelled && location.href === pageUrl) {
+      if(job.fast && !await fastGate(job,pageUrl))return;
+      if(job.fast && !job.domFallback) {
+        const observed=await responseDetail(job.id);
+        if(observed && pageUrl===job.url) {
+          const reply=await bg({type:"detail-result",taskId:job.taskId,nonce:job.nonce,
+            payload:{...observed,url:pageUrl,listing_id:job.id},timings:{request_ms:Date.now()-job.startedAt}});
+          if(reply.fallback){job.domFallback=true;show("响应字段需详情核验："+reply.reason,false);}
+          else if(reply.held || reply.paused){if(reply.nonce)job.nonce=reply.nonce;await sleep(250);continue;}
+          else return;
+        } else {
+          // Give normal page requests a short opportunity; DOM fallback retains its original readiness rule.
+          if(!job.responseDeadline)job.responseDeadline=Date.now()+1500;
+          if(Date.now()<job.responseDeadline){await sleep(100);continue;}
+          job.domFallback=true;
+        }
+      }
       const title = await waitDetailTitle(pageUrl, job.prefix, job);
       let payload, error = title?.error;
       if (title?.delisted) error = "delisted";
@@ -442,7 +478,9 @@
         }
       }
       show(error ? "详情未采集：" + error : "详情已就绪，正在入库…", !error);
-      const reply = await bg({type:"detail-result", taskId:job.taskId, nonce:job.nonce, payload, error});
+      const reply = await bg({type:"detail-result", taskId:job.taskId, nonce:job.nonce, payload, error,
+        ...(job.fast ? {timings:{request_ms:Date.now()-job.startedAt}} : {})});
+      if(job.fast && reply.held){await sleep(250);continue;}
       if (!reply.paused) return;
       if (!await waitVerification(pageUrl, job, true, true)) return;
     }
@@ -465,7 +503,7 @@
     }
     const target = resumeTask?.requested || (detailPage ? 1 : targetCards());
     const mode = resumeTask?.mode || (detailPage ? "detail" : CONFIG.collection_mode);
-    const protocol = !detailPage && (mode === "auto" || CONFIG.target_count > 0 || CONFIG.purpose && CONFIG.purpose !== "discover");
+    const protocol = !detailPage && (mode === "auto" || CONFIG.detail_transport === "response_auto" || CONFIG.target_count > 0 || CONFIG.purpose && CONFIG.purpose !== "discover");
     const started = resumeTask ? {ok:true, taskId:resumeTask.id, batch:resumeTask.batch, config:resumeTask.config}
       : await bg({type:"collection-begin", mode, total:target, pageUrl,
         ...(protocol ? {protocol_version:1, purpose:CONFIG.purpose || "discover"} : {})});
@@ -699,6 +737,8 @@
     return undefined;
   });
 
+  // Hold cancels cancellable document loads; page-owned XHR may already be in flight.
+  chrome.runtime.onMessage.addListener(msg=>{if(msg?.type==="detail-hold" && msg.taskId===taskId){window.stop?.();}});
   // ---------- 入口 ----------
   bg({type:"detail-context", pageUrl:location.href}).then(async context => {
     workerPage = !!context.worker;

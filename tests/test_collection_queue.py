@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize('script', ['collection_queue.cjs', 'collection_retry.cjs', 'content_dedup.cjs', 'backfill_queue.cjs', 'backfill_popup_delete.cjs', 'content_modes.cjs', 'content_cancel.cjs', 'content_delist.cjs', 'dashboard_backfill.cjs', 'verification.cjs', 'content_verification.cjs', 'slider_input.cjs', 'slider_runner.cjs', 'content_batch.cjs'])
+@pytest.mark.parametrize('script', ['detail_pool.cjs', 'collection_queue.cjs', 'collection_retry.cjs', 'content_dedup.cjs', 'backfill_queue.cjs', 'backfill_popup_delete.cjs', 'content_modes.cjs', 'content_cancel.cjs', 'content_delist.cjs', 'dashboard_backfill.cjs', 'verification.cjs', 'content_verification.cjs', 'slider_input.cjs', 'slider_runner.cjs', 'content_batch.cjs'])
 def test_extension_collection_queue(script):
     node = shutil.which('node')
     if not node:

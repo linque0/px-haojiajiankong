@@ -55,6 +55,8 @@
   <p class="muted">已采且未变化的账号自动跳过；信息变化时更新，缺项自动补采一次。更新和重试另计。</p>
   <label>SPA 等待(ms) <input type="number" id="c-settle" min="500" max="30000" step="100" value="2500"></label>
   <label>全文请求间隔(秒) <input type="number" id="c-title-interval" min="0" max="10" step="0.1" value="3"></label>
+  <label>详情传输 <select id="c-detail-transport"><option value="page">原详情页面</option><option value="response_auto">实验：正常响应优先</option></select></label>
+  <label>详情并发 <select id="c-detail-concurrency"><option value="0">推荐（未验收时1）</option><option value="1">手动 1</option><option value="2">手动 2</option><option value="3">手动 3</option><option value="4">手动 4</option><option value="5">手动 5</option><option value="6">手动 6</option><option value="7">手动 7</option><option value="8">手动 8</option></select></label>
   <label>详情采集间隔(秒) <input type="number" id="c-detail-interval" min="0" max="10" step="0.1" value="0"></label>
   <div class="muted">两种间隔相互独立、分别只作用于各自模式：全文请求间隔仅用于列表模式（第 2 次请求起生效）；详情采集间隔仅用于详情页采集（第 2 张详情起生效，0 = 不等待）。</div>
   <label><input type="checkbox" id="c-debug"> 调试日志</label>
@@ -87,7 +89,7 @@
   <button id="stop" class="ghost">停止服务</button>
 </section>
 <footer>数据仅存本机 · 两种方式均无需悬浮<br>
-  详情队列复用一个后台标签页，关闭弹窗仍可继续<br>
+  原详情复用单页；实验性响应优先按所选并发复用工作页，关闭弹窗仍可继续<br>
   扩展 v0.3.0+ 支持自更新：代码更新后自动重载，无需再手动「重新加载」<br>
   路径自定义请点「完整看板 → 数据存放位置」</footer>
 <script src="popup.js"></script>

@@ -178,7 +178,7 @@
       <button class="ghost mini" id="l-next">下一页</button>
       <button class="ghost mini" id="l-last">末页</button>
     </div>
-    <p class="muted">— 表示未采到，0 表示明确为零。超过30字的文本默认折叠，点击展开查看全文。列表采集优先复用完整标题，缺失时按商品编号限速补采。也可在扩展选择「详情页采集」，逐个正常打开商品读取角色链数与武器精炼；进度与待补齐数量见扩展弹窗。若遇网站验证，完成验证后重新采集本页。</p>
+    <p class="muted">— 表示未采到，0 表示明确为零。超过30字的文本默认折叠，点击展开查看全文。列表采集优先复用完整标题，缺失时按商品编号限速补采。详情采集取得角色链数、武器精炼及地图文字；实验性响应优先支持1～8账号并发，字段不足时在原页补齐。验证解除后继续原任务；进度与待补齐数量见扩展弹窗。</p>
     <div style="overflow-x:auto"><table id="listings"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
 
@@ -283,10 +283,12 @@
       <label>每次新增账号数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
       <label>全文请求间隔（秒）<input type="number" id="c-title-interval" min="0" max="10" step="0.1"></label>
+      <label>详情传输 <select id="c-detail-transport"><option value="page">原详情页面</option><option value="response_auto">实验：正常响应优先</option></select></label>
+      <label>详情并发 <select id="c-detail-concurrency"><option value="0">推荐（未验收时1）</option><option value="1">手动 1</option><option value="2">手动 2</option><option value="3">手动 3</option><option value="4">手动 4</option><option value="5">手动 5</option><option value="6">手动 6</option><option value="7">手动 7</option><option value="8">手动 8</option></select></label>
       <label>详情采集间隔（秒）<input type="number" id="c-detail-interval" min="0" max="10" step="0.1"></label>
       <label><input type="checkbox" id="c-debug"> 调试日志（控制台）</label>
       <p class="muted" style="margin:2px 0 0">
-        扩展支持 1～200 任意整数，只采前 N 个唯一商品；不足时滚动加载更多，连续两轮无新增即停。详情模式复用一个后台标签页逐个采集，标题就绪即读取，无逐商品固定等待。<br>
+        手动单块支持 1～200 任意整数，较大逻辑目标按块执行；不足时滚动加载更多并报告实际数量。原详情模式复用一个后台标签页；实验性响应优先按所选并发复用工作页，字段完整即可提交，缺项在原页补齐。<br>
         去重间隔：同一标签页会话内，同一网址成功自动采集后再次自动采集的最短间隔；手动采集不受限制。<br>
         SPA 等待：站内路由切换后给页面渲染预留的等待；详情队列不逐张套用。全文请求间隔仅用于列表模式，详情采集间隔仅用于详情页采集（第 2 张起生效），两种间隔相互独立。采集任务内自动按商品编号去重并计数，不会重复采集同一账号。采集进度和取消操作在扩展弹窗中。</p>
       <div style="margin-top:10px">
@@ -317,7 +319,7 @@
       </div>
       <div id="risk"></div>
       <p class="muted" style="margin-bottom:0">
-        通道说明：插件支持列表采集与后台串行详情采集（「每次采集张数」调大时在列表内触发站点自身的
+        通道说明：插件支持列表采集、原详情采集与实验性并发详情采集（「每次采集张数」调大时在列表内触发站点自身的
         加载更多，等同手动滚动；不猜 URL、不请求站外接口），不受 Playwright 风控退避影响；
         拦截页拒收不入库；插件通道覆盖不完整，下架推断固定关闭。</p>
     </section>
@@ -462,12 +464,13 @@ function renderCollection(data) {
   const purposes={discover:"新发现",price_refresh:"价格复采",detail_enrich:"详情补齐"};
   const time=value=>value ? new Date(value).toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"}) : "—";
   $("collection-jobs").innerHTML=(data.batches || []).map(b=> {
-    const c=b.counts || {};
+    const c=b.counts || {},p=b.checkpoint || {},t=p.timings || {};
     const exp=(data.exports || []).find(e=>e.game_id===b.game_id);
     const sync=exp && exp.dirty_generation>exp.exported_generation ? exp.error ? "导出待重试" : "导出等待中" : "导出已同步";
     const analysis=b.handoff?.ok ? "趋势视图已更新，估值发布待交接" : "分析等待中";
     return `<p><b>${esc(purposes[b.config?.purpose])} · 目标 ${esc(b.config?.target_count)}</b> · ${esc(labels[b.status] || b.status)}<br>`
       +`扫描 ${esc(c.scanned)} · 价格 ${esc(c.prices)} · 新增 ${esc(c.new)} · 完整介绍 ${esc(c.text_complete)} · 文字与字段满足 ${esc(c.complete)} · 待补 ${esc(c.pending)} · 主动操作 ${esc(b.active_operations)}<br>`
+      +(p.concurrency ? `并发 ${esc(p.concurrency)} · 在途 ${esc(p.in_flight||0)} · 响应 ${esc(p.response_complete||0)} · DOM回退 ${esc(p.dom_fallback||0)} · 验证 ${esc(p.verification_count||0)} · 端到端 ${esc(p.elapsed_ms!=null ? (p.elapsed_ms/1000).toFixed(1)+"s":"进行中")}<br>发现 ${esc((t.discovery_ms/1000||0).toFixed(1))}s · 请求累计 ${esc((t.request_ms/1000||0).toFixed(1))}s · 解析累计 ${esc((t.parse_ms/1000||0).toFixed(1))}s · 入库累计 ${esc((t.commit_ms/1000||0).toFixed(1))}s · 验证等待 ${esc((t.verification_ms/1000||0).toFixed(1))}s<br>` : "")
       +`${esc(time(b.started_at))} · ${esc(sync)} · ${esc(analysis)} · ${esc(b.stop_reason)}`
       +(b.status==="needs_reconcile" ? ` <button class="ghost" data-reconcile-cancel="${esc(b.batch_id)}">已对账，取消未完成部分</button>` : "")
       +(!["running","waiting_verification"].includes(b.status) ? ` <button class="ghost" data-local-retry="${esc(b.batch_id)}">重试本地导出与分析</button>` : "")+"</p>";
@@ -583,6 +586,8 @@ async function savePaths(payload, okText) {
 
 function fillConfig(c) {
   $("c-mode").value = c.collection_mode || "list";
+  $("c-detail-transport").value = c.detail_transport || "page";
+  $("c-detail-concurrency").value = String(c.detail_concurrency ?? 0);
   $("c-purpose").value = c.purpose || "discover";
   $("c-target").value = c.target_count || 0;
   $("c-ids").value = (c.selected_listing_ids || []).join(", ");
@@ -619,6 +624,8 @@ async function saveConfig(payload) {
 
 $("save").addEventListener("click", () => saveConfig({
   collection_mode: $("c-mode").value,
+      detail_transport: $("c-detail-transport").value,
+      detail_concurrency: Number($("c-detail-concurrency").value),
   purpose:$("c-purpose").value, target_count:Number($("c-target").value),
   selected_listing_ids:$("c-ids").value.trim() ? $("c-ids").value.trim().split(/[\s,，]+/) : [],
   scan_budget:Number($("c-scan").value), max_scan_rounds:Number($("c-rounds").value),
