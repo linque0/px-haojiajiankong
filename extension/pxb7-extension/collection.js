@@ -154,7 +154,7 @@
         await save(task);
         try { await chrome.tabs.update(tabId, {active:true}); } catch (_) { /* 标签页关闭会取消任务 */ }
       }
-      return {ok:true, paused:true, progress:view(task)};
+      return {ok:true, paused:true, nonce:task.nonce, progress:view(task)};
     }
     function ownsVerificationPage(task, sender, reported) {
       if (task.verification?.tabId !== sender.tab?.id) return false;
@@ -337,6 +337,22 @@
         await chrome.alarms.create(ALARM, {when:Date.now() + (task.workerTab ? 60000 : 180000)});
         return {ok:true, nonce:task.nonce, progress:view(task)};
       }),
+      claimVerificationAttempt: (sender, msg) => serial(async () => {
+        const task = await read();
+        if (task?.status !== "waiting_verification" || task.id !== msg.taskId
+            || !ownsVerificationPage(task, sender, msg.pageUrl)) return {ok:false, error:"task-changed"};
+        if (task.workerTab && task.nonce !== msg.nonce) return {ok:false, error:"task-changed"};
+        if (task.verification.autoAttempted) return {ok:false, error:"attempt-used"};
+        // 在输入前持久化，刷新页面/后台重启不会反复操作同一个等待事件。
+        task.verification.autoAttempted = true;
+        await save(task);
+        return {ok:true, startedAt:task.verification.startedAt};
+      }),
+      verificationAttemptActive: async (sender, msg, startedAt) => {
+        const task = await read();
+        return task?.status === "waiting_verification" && task.id === msg.taskId
+          && task.verification.startedAt === startedAt && ownsVerificationPage(task, sender, msg.pageUrl);
+      },
       confirmVerification: () => serial(async () => {
         const task = await read();
         if (task?.status !== "waiting_verification") return {ok:false, err:"没有等待验证的任务"};

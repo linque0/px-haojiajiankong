@@ -437,6 +437,12 @@ def test_plugin_config_defaults_and_roundtrip(settings: cfg.Settings) -> None:
     for invalid in ("fast", None, 1, True):
         with pytest.raises(G.GatewayError):
             G.save_plugin_config(settings, {"collection_mode": invalid})
+    assert G.DEFAULT_PLUGIN_CONFIG["verification_mode"] == "manual"
+    for mode in ("manual", "auto_slider"):
+        assert G.save_plugin_config(settings, {"verification_mode": mode})["verification_mode"] == mode
+    for invalid in ("ignore", "list", None, 1, True, {}):
+        with pytest.raises(G.GatewayError):
+            G.save_plugin_config(settings, {"verification_mode": invalid})
     assert saved["title_interval_ms"] == 3000
     # 2026-10-04 用户指令：全文请求间隔可调 0–10 秒、0.1 秒步进（网关按 100ms 粒度取整）
     assert G.save_plugin_config(settings, {"title_interval_ms":6000})["title_interval_ms"] == 6000

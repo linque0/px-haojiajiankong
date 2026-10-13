@@ -4,8 +4,9 @@ const {create}=require('../extension/pxb7-extension/collection.js');
 const content=fs.readFileSync('extension/pxb7-extension/content.js','utf8');
 const verification=fs.readFileSync('extension/pxb7-extension/verification.js','utf8');
 const sourceUrl='https://www.pxb7.com/buy/10302/1', itemUrl='https://www.pxb7.com/product/123456/1';
-async function scenario(worker=false,reloaded=false) {
+async function scenario(worker=false,reloaded=false,auto=null) {
   let blocked=worker||reloaded,loaded=reloaded?1:0,clicks=0,pauses=0,resumes=0,ingests=0,begins=0;
+  let automaticAttempts=0;
   const storage={},handlers=[];
   const sender={tab:{id:worker?20:10,url:worker?itemUrl:sourceUrl},url:worker?itemUrl:sourceUrl};
   const text='80级，1个五星角色：安可；1个五星武器：精1千古洑流；详情看图';
@@ -31,11 +32,18 @@ async function scenario(worker=false,reloaded=false) {
   }
   chrome.runtime={getManifest:()=>({version:'0.5.4'}),onMessage:{addListener:fn=>handlers.push(fn)},sendMessage(msg,cb){
     let promise;
-    if(msg.type==='config')return cb({ok:true,data:{ok:true,config:{auto_ingest:!reloaded,collection_mode:'list',cards_target:1,spa_settle_ms:1}}});
+    if(msg.type==='config')return cb({ok:true,data:{ok:true,config:{auto_ingest:!reloaded,collection_mode:'list',cards_target:1,spa_settle_ms:1,verification_mode:auto?'auto_slider':'manual'}}});
     if(msg.type==='detail-context')promise=queue.context(sender);
     else if(msg.type==='collection-begin'){begins++;promise=queue.begin(sender,msg);}
     else if(msg.type==='verification-pause'){
-      pauses++;promise=queue.verificationPause(sender,msg).then(reply=>{completeManually();return reply;});
+      pauses++;promise=queue.verificationPause(sender,msg).then(reply=>{if(!auto)completeManually();return reply;});
+    }else if(msg.type==='verification-attempt'){
+      automaticAttempts++;promise=queue.claimVerificationAttempt(sender,msg).then(reply=>{
+        assert.equal(reply.ok,true,'工作页必须使用暂停后的nonce');
+        if(auto==='success'){blocked=false;loaded=1;}
+        else completeManually();
+        return {ok:true,inputSent:true};
+      });
     }else if(msg.type==='verification-resume'){resumes++;promise=queue.verificationResume(sender,msg);}
     else if(msg.type==='collection-progress')promise=queue.update(sender,msg);
     else if(msg.type==='detail-result')promise=queue.result(sender,msg);
@@ -70,6 +78,9 @@ async function scenario(worker=false,reloaded=false) {
   assert.equal(ingests,1,'恢复后不重复提交已成功账号');assert.equal(resumes,1);
   assert.equal(begins,worker||reloaded?0:1,'重载后的恢复复用原任务');
   assert.equal(pauses,reloaded?0:1);
+  assert.equal(automaticAttempts,auto?1:0);
 }
-(async()=>{await scenario();await scenario(true);await scenario(false,true);console.log('actual modules: list/worker verification recovery and paused source reload: PASS');})()
+(async()=>{await scenario();await scenario(true);await scenario(false,true);
+  await scenario(false,false,'success');await scenario(true,false,'success');await scenario(true,false,'failure');
+  console.log('actual modules: manual/automatic list/worker recovery, failed input waits, source reload: PASS');})()
 .catch(e=>{console.error(e);process.exitCode=1;});

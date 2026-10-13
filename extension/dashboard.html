@@ -262,6 +262,8 @@
       <h2>插件设置（脚本自动应用：≤5 分钟或页面刷新生效）</h2>
       <label><input type="checkbox" id="c-auto"> 自动采集（浏览到列表/详情页时入库）</label>
       <label>扩展采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
+      <label>扩展网站验证 <select id="c-verification"><option value="manual">人工完成后续采</option><option value="auto_slider">自动尝试普通滑块一次</option></select></label>
+      <p class="muted">自动模式需v0.5.14扩展的浏览器调试权限，仅操作当前采集页，浏览器会显示调试提示。失败或拼图保留现场；油猴不支持此模式。</p>
       <label>同一 URL 去重间隔（分钟）<input type="number" id="c-interval" min="1" max="1440" step="1"></label>
       <label>每次新增账号数<input type="number" id="c-cards" min="1" max="200" step="1"></label>
       <label>SPA 渲染等待（毫秒）<input type="number" id="c-settle" min="500" max="30000" step="100"></label>
@@ -527,6 +529,7 @@ async function savePaths(payload, okText) {
 
 function fillConfig(c) {
   $("c-mode").value = c.collection_mode || "list";
+  $("c-verification").value = c.verification_mode || "manual";
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
   $("c-cards").value = c.cards_target || 16;
@@ -554,6 +557,7 @@ async function saveConfig(payload) {
 
 $("save").addEventListener("click", () => saveConfig({
   collection_mode: $("c-mode").value,
+  verification_mode: $("c-verification").value,
   auto_ingest: $("c-auto").checked,
   reingest_interval_min: Number($("c-interval").value),
   cards_target: Number($("c-cards").value),
@@ -563,7 +567,7 @@ $("save").addEventListener("click", () => saveConfig({
   debug: $("c-debug").checked,
 }));
 $("reset").addEventListener("click", () => saveConfig({
-  collection_mode: "list", auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
+  collection_mode: "list", verification_mode:"manual", auto_ingest: true, reingest_interval_min: 10, cards_target: 16,
   spa_settle_ms: 2500, debug: false, title_interval_ms:3000, detail_interval_ms:0 }));
 
 $("targets-all").addEventListener("click", () => {

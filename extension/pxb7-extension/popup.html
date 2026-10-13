@@ -39,6 +39,8 @@
 <section class="settings">
   <label>采集方式 <select id="c-mode"><option value="list">列表采集</option><option value="detail">详情页采集</option></select></label>
   <div id="mode-help" class="muted"></div>
+  <label>网站验证 <select id="c-verification"><option value="manual">人工完成后续采</option><option value="auto_slider">自动尝试普通滑块一次</option></select></label>
+  <div class="muted">自动模式使用浏览器调试权限，仅操作当前采集页；浏览器会显示调试提示。失败或拼图保留现场，完成验证后继续原任务。</div>
   <label><input type="checkbox" id="c-auto"> 自动采集</label>
   <label>去重间隔(分) <input type="number" id="c-interval" min="1" max="1440" step="1" value="10"></label>
   <label>每次新增账号数 <input type="number" id="c-cards" min="1" max="200" step="1" value="16"></label>

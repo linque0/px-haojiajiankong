@@ -1,4 +1,4 @@
-/** 访问验证观察器：只读取可见DOM；等待用户完成验证，不操作验证控件。 */
+/** 访问验证观察器：检查可见DOM，可调用一次验证处理器，稳定解除后恢复。 */
 (function(root) {
   "use strict";
   const SELECTORS = ["#aliyunCaptcha-sliding-slider", ".nc_iconfont.btn_slide", "#waf_nc_block", ".aliyunCaptcha-show", "#nocaptcha"];
@@ -30,7 +30,7 @@
   async function waitForClear(doc, win, options = {}) {
     const sleep = options.sleep || (ms => new Promise(resolve => win.setTimeout(resolve, ms)));
     const now = options.now || Date.now;
-    let paused = !!options.alreadyPaused, observed = !options.requireObserved, clearSince = null;
+    let paused = !!options.alreadyPaused, observed = !options.requireObserved, clearSince = null, attempted = false;
     while (!options.alive || options.alive()) {
       const state = detect(doc, win);
       if (state.blocked) {
@@ -38,6 +38,11 @@
         if (!paused) {
           if (options.onBlocked && await options.onBlocked(state) === false) return {ok:false, error:"task-changed"};
           paused = true;
+        }
+        // 只在真实可见挑战上尝试一次。处理器回执只表示输入执行，不代表验证通过。
+        if (!attempted && options.onAttempt) {
+          attempted = true;
+          await options.onAttempt(state);
         }
       } else if (!paused) {
         return {ok:true, waited:false};
@@ -48,7 +53,7 @@
           return {ok:true, waited:true};
         }
       }
-      await sleep(250); // 被动观察，没有站点请求、滑块拖动或刷新重试。
+      await sleep(250); // 不刷新页面，也不循环提交挑战。
     }
     return {ok:false, error:"cancelled-or-route-change"};
   }

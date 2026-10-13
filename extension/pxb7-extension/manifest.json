@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "pxb7 采集助手（前端 B）",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "按商品ID跨批次去重；列表变化更新、缺项自动重试一次；看板按账号对比历史变化；支持详情队列、查缺补录、验证恢复与网关启停。",
   "icons": {
     "16": "icons/icon16.png",
@@ -9,7 +9,7 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["storage", "tabs", "clipboardWrite", "alarms", "nativeMessaging"],
+  "permissions": ["storage", "tabs", "clipboardWrite", "alarms", "nativeMessaging", "debugger"],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"

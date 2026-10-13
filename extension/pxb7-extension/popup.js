@@ -185,7 +185,7 @@ function modeHelp() {
   $("c-title-interval").disabled = detail;
   $("c-detail-interval").disabled = !detail;
 }
-["c-mode", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-detail-interval", "c-debug"].forEach(id => {
+["c-mode", "c-verification", "c-auto", "c-interval", "c-cards", "c-settle", "c-title-interval", "c-detail-interval", "c-debug"].forEach(id => {
   $(id).addEventListener("input", () => {settingsDirty = true; modeHelp();});
 });
 function renderProgress(p) {
@@ -250,6 +250,7 @@ async function refresh() {
   if (settingsDirty) return;
   const c = s.config || {};
   $("c-mode").value = c.collection_mode || "list";
+  $("c-verification").value = c.verification_mode || "manual";
   modeHelp();
   $("c-auto").checked = !!c.auto_ingest;
   $("c-interval").value = c.reingest_interval_min;
@@ -269,6 +270,7 @@ async function saveSettings() {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       collection_mode: $("c-mode").value,
+      verification_mode: $("c-verification").value,
       auto_ingest: $("c-auto").checked,
       reingest_interval_min: Number($("c-interval").value),
       cards_target: Number($("c-cards").value),

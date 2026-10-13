@@ -81,6 +81,7 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "detail_interval_ms": 0,       # 详情页采集的逐张间隔；0–10 秒（0.1 秒步进），与列表间隔互相独立
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
     "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
+    "verification_mode": "manual", # manual / auto_slider（一次普通滑块交互）
     "targets": [],                 # 采集目标：dim_task.task_id 列表；空=只用网关启动任务
     "paths": {},                   # 数据路径自定义：{db|raw_root|runs|log_dir: 绝对路径}
 }
@@ -93,6 +94,7 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "detail_interval_ms": (float, (0, 10000)),
     "cards_target": (int, (1, 200)),
     "collection_mode": (str, None),
+    "verification_mode": (str, None),
 }
 _TASK_ID_RE = re.compile(r"[0-9A-Za-z_\-]{1,64}")
 
@@ -292,8 +294,9 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
                 raise GatewayError(f"配置 {key}={value} 超出范围 {bounds[0]}–{bounds[1]}")
             value = round(value / 100) * 100
         elif expect_type is str:
-            if value not in ("list", "detail"):
-                raise GatewayError("collection_mode 必须是 list 或 detail")
+            choices = ("manual", "auto_slider") if key == "verification_mode" else ("list", "detail")
+            if value not in choices:
+                raise GatewayError(f"{key} 必须是 {' 或 '.join(choices)}")
         else:
             if not isinstance(value, bool):
                 raise GatewayError(f"配置 {key} 必须是布尔值")

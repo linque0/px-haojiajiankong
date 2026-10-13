@@ -29,5 +29,11 @@ async function sequence(states, options={}) {
   assert.equal(s.result.ok,false);assert.equal(s.resumed,0,'网关拒收但未观察到验证解除时不定时重试');
   s=await sequence([false],{alreadyPaused:true,requireObserved:true,confirmed:()=>true});
   assert.equal(s.result.ok,true);assert.equal(s.resumed,1,'用户确认后仍观察稳定解除再继续');
+  let attempts=0;
+  s=await sequence([true],{onAttempt:async()=>{attempts++;return {ok:true,inputSent:true};}});
+  assert.equal(attempts,1);assert.equal(s.resumed,0,'输入执行不代表验证通过');
+  attempts=0;
+  s=await sequence([true,true,false,false,false],{onAttempt:async()=>{attempts++;}});
+  assert.equal(attempts,1);assert.equal(s.resumed,1,'自动尝试后仍等稳定解除');
   console.log('visible slider detection, hidden SDK, stable recovery, cancellation and explicit recovery: PASS');
 })().catch(e=>{console.error(e);process.exitCode=1;});

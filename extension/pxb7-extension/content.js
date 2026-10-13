@@ -17,7 +17,7 @@
   // 远端可配置项（看板/弹窗设置区写入网关 /config，脚本定期拉取应用）
   let CONFIG = { auto_ingest: true, reingest_interval_min: 10, spa_settle_ms: 2500,
                  debug: false, cards_target: 16, title_interval_ms:3000,
-                 detail_interval_ms:0, collection_mode:"list" };
+                 detail_interval_ms:0, collection_mode:"list", verification_mode:"manual" };
 
   // 采集目标（网关下发）：列表页按 URL 的 game_id 预检；详情页 URL 不含游戏 → 交网关裁决
   let TARGETS = null;      // {mode, tasks:[...], games:[...]}；null=未获取（放行，最终由网关裁决）
@@ -119,7 +119,9 @@
       onBlocked:async () => {
         manualVerificationConfirmed = false;
         show("等待网站滑块验证；完成后自动继续，进度已保留", false);
-        return (await bg({type:"verification-pause", ...identity()})).ok;
+        const reply = await bg({type:"verification-pause", ...identity()});
+        if (job && reply.nonce) job.nonce = reply.nonce;
+        return reply.ok;
       },
       onClear:async () => {
         const reply = await bg({type:"verification-resume", ...identity()});
@@ -129,12 +131,20 @@
         show("验证已恢复，继续原采集任务", true);
         return true;
       },
+      onAttempt:CONFIG.verification_mode === "auto_slider" ? async () => {
+        show("正在尝试普通滑块验证；原任务进度已保留", false);
+        const reply = await bg({type:"verification-attempt", ...identity()});
+        if (!cancelled && location.href === pageUrl) show(reply.inputSent
+          ? "滑块输入已执行，等待网站确认；未通过时可人工完成"
+          : "自动验证未完成（" + (reply.error || "不可用") + "）；可人工完成后续采", false);
+      } : undefined,
     });
     return result.ok;
   }
   async function waitRejectedVerification(pageUrl, job = null) {
     const reply = await bg({type:"verification-pause", taskId:job?.taskId || taskId, nonce:job?.nonce, pageUrl});
     if (!reply.ok) return false;
+    if (job && reply.nonce) job.nonce = reply.nonce;
     manualVerificationConfirmed = false;
     show("验证页已拒收；请完成验证，或在弹窗确认后继续", false);
     // 网关拒收但页面没有可见挑战时，不靠定时器重复提交；等待挑战出现/消失或用户明确确认。
@@ -553,6 +563,7 @@
     workerPage = !!context.worker;
     if (workerPage) {
       if (context.job) {
+        await fetchConfig(); // 工作页也需要网站验证策略，不能沿用脚本默认manual。
         try { await runWorker(context.job); }
         catch (_) { await bg({type:"detail-result", taskId:context.job.taskId, nonce:context.job.nonce, error:"detail-read-error"}); }
       }

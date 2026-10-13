@@ -14,7 +14,7 @@ const GATEWAY = "http://127.0.0.1:8765";
 
 // 可代理的采集端点白名单：内容脚本只能提交到这两个固定路径（防御性收紧）
 const INGEST_PATHS = new Set(["/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry"]);
-importScripts("collection.js");
+importScripts("collection.js", "slider-input.js");
 // 详情队列的间隔来自网关 /config（deps.getConfig）；列表模式不经此路径，两者互不共用。
 const collection = PXB7_COLLECTION.create(chrome, (path, payload) => gfetch(path, withJsonBody(payload)),
   { getConfig: async () => {
@@ -112,6 +112,20 @@ function withJsonBody(payload) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return undefined;
+  if (msg.type === "verification-attempt") {
+    (async () => {
+      if (sender.id !== chrome.runtime.id || sender.frameId !== 0 || !PXB7_SLIDER_INPUT.allowedPage(msg.pageUrl)) {
+        return {ok:false, error:"unsupported-page"};
+      }
+      const cfg = await gfetch("/config");
+      if (!cfg.ok || cfg.data?.config?.verification_mode !== "auto_slider") return {ok:false, error:"auto-disabled"};
+      const claim = await collection.claimVerificationAttempt(sender, msg);
+      if (!claim.ok) return claim;
+      return PXB7_SLIDER_INPUT.attempt(chrome, sender.tab.id, msg.pageUrl,
+        {alive:() => collection.verificationAttemptActive(sender, msg, claim.startedAt)});
+    })().then(sendResponse).catch(() => sendResponse({ok:false, error:"automatic-input-unavailable"}));
+    return true;
+  }
   if (["backfill-query", "backfill-start", "backfill-state", "backfill-sync", "backfill-delete"].includes(msg.type)) {
     if (!extensionPage(sender)) { sendResponse({ok:false, err:"extension-page-required"}); return true; }
     let job;
