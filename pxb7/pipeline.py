@@ -33,6 +33,7 @@ import json
 import os
 import re
 import time
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field as _dc_field
 from pathlib import Path
@@ -398,8 +399,23 @@ def _pid_alive(pid: int) -> bool | None:
         return None
 
 
+_thread_locks: dict[str, threading.RLock] = {}
+_thread_locks_guard = threading.Lock()
+
+
 @contextmanager
 def run_lock(settings: Settings):
+    """Serialize gateway/export threads before acquiring the cross-process lock."""
+    key = str(Path(settings.paths.state_dir).resolve())
+    with _thread_locks_guard:
+        mutex = _thread_locks.setdefault(key, threading.RLock())
+    with mutex:
+        with _run_file_lock(settings) as value:
+            yield value
+
+
+@contextmanager
+def _run_file_lock(settings: Settings):
     """采集串行锁：同一登录态不做多任务并发（docs/01 §3.3 登录态运行纪律）。
 
     allow_concurrent_tasks=true 时不加锁（留给 W2 的调度器自行串行化）。

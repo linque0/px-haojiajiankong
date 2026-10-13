@@ -1,0 +1,20 @@
+{
+  "captured_on": "2026-10-14",
+  "comparison": "Previously captured rendered product text; recommendations and buyer telemetry are not retained.",
+  "samples": [
+    {
+      "id": "2447108517806290661",
+      "introduction_matches": true,
+      "public_names": 106,
+      "missing_names": [],
+      "price_yuan": 550
+    },
+    {
+      "id": "2447969231586192717",
+      "introduction_matches": true,
+      "public_names": 85,
+      "missing_names": [],
+      "price_yuan": 560
+    }
+  ]
+}

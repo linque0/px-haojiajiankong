@@ -379,12 +379,20 @@ def progress(state, payload):
         if not isinstance(checkpoint, dict) or len(C.encode(checkpoint)) > 1024000:
             raise ValueError("invalid-checkpoint")
         checkpoint = {k:v for k,v in checkpoint.items() if k in (
-            "phase", "processed", "current_id", "scanned", "pending_ids", "events", "diagnostics")}
+            "phase", "processed", "current_id", "scanned", "pending_ids", "events", "diagnostics",
+            "timings","elapsed_ms","concurrency","complete_count","in_flight","dom_fallback","response_complete","verification_count")}
+        for key in ("elapsed_ms","concurrency","complete_count","in_flight","dom_fallback","response_complete","verification_count"):
+            if key in checkpoint and (type(checkpoint[key]) not in (int,float) or not 0<=checkpoint[key]<=1e12):
+                checkpoint.pop(key)
+        timing=checkpoint.get("timings")
+        checkpoint["timings"]={key:value for key,value in (timing.items() if isinstance(timing,dict) else [])
+            if key in ("discovery_ms","request_ms","submit_ms","gateway_ms","parse_ms","commit_ms","verification_ms")
+            and type(value) in (int,float) and 0<=value<=1e12}
         checkpoint["diagnostics"]=clean_diagnostics(checkpoint.get("diagnostics",[]))
         events=checkpoint.get("events",[])
         if not isinstance(events,list) or len(events)>200:
             raise ValueError("invalid-events")
-        checkpoint["events"]=[{k:v for k,v in e.items() if k in ("type","at","id","stage","waiting_ms","intervention")}
+        checkpoint["events"]=[{k:v for k,v in e.items() if k in ("type","at","id","stage","waiting_ms","intervention","path","complete")}
             for e in events if isinstance(e,dict) and e.get("type") in (
                 "challenge_detected","input_attempted","input_sent","unsupported","input_failed",
                 "challenge_cleared","business_ready","item_committed")]

@@ -89,6 +89,8 @@ DEFAULT_PLUGIN_CONFIG: dict[str, Any] = {
     "detail_interval_ms": 0,       # 详情页采集的逐张间隔；0–10 秒（0.1 秒步进），与列表间隔互相独立
     "cards_target": 16,            # 每次采集目标张数（站点一页渲染 16 张；调大 = 页内加载更多）
     "collection_mode": "list",     # 扩展：列表全文 / 逐个打开详情
+    "detail_transport": "page",    # page / response_auto (experimental)
+    "detail_concurrency": 0,       # 0 recommended=1 until accepted; manual 1..8
     "verification_mode": "manual", # manual / auto_slider（一次普通滑块交互）
     "purpose": "discover",
     "target_count": 0,             # 0继承手动cards_target；逻辑任务独立于200条执行块。
@@ -110,6 +112,8 @@ _PLUGIN_CONFIG_SPEC: dict[str, tuple[type, tuple[float, float] | None]] = {
     "detail_interval_ms": (float, (0, 10000)),
     "cards_target": (int, (1, 200)),
     "collection_mode": (str, None),
+    "detail_transport": (str, None),
+    "detail_concurrency": (int, (0, 8)),
     "verification_mode": (str, None),
     "purpose": (str, None),
     "target_count": (int, (0, CJ.MAX_TARGET)),
@@ -326,7 +330,7 @@ def validate_plugin_config(raw: Any, *, known_targets: Sequence[str] | None = No
                 raise GatewayError(f"配置 {key}={value} 超出范围 {bounds[0]}–{bounds[1]}")
             value = round(value / 100) * 100
         elif expect_type is str:
-            choices = (("manual", "auto_slider") if key == "verification_mode" else CJ.PURPOSES
+            choices = (("page", "response_auto") if key == "detail_transport" else ("manual", "auto_slider") if key == "verification_mode" else CJ.PURPOSES
                        if key == "purpose" else ("list", "detail", "auto"))
             if value not in choices:
                 raise GatewayError(f"{key} 必须是 {' 或 '.join(choices)}")
@@ -520,10 +524,10 @@ def _target_not_selected(state: GatewayState, game_id: int) -> tuple[int, dict[s
                             f"勾选对应游戏后再浏览该页面"}
 
 
-def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _ingest_detail(state: GatewayState, payload: dict[str, Any], *, structured=None) -> tuple[int, dict[str, Any]]:
     """详情页采集（M5）：落 raw + 回填最近一轮快照；快照未到则挂起待列表批次合并。"""
     html = str(payload.get("html") or "")
-    if not html.strip():
+    if not html.strip() and structured is None:
         return 400, {"ok": False, "error": "empty-html"}
     risk = _reject_risk_page(html)
     if risk:
@@ -545,7 +549,7 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
                      or payload.get("url") != f"https://www.pxb7.com/product/{listing_id}/1"):
         return 400, {"ok": False, "error": "invalid-backfill-target"}
 
-    game_id, biz_prod = _identify_detail_game(state, listing_id, html)
+    game_id, biz_prod = (10302, 1) if structured is not None else _identify_detail_game(state, listing_id, html)
     if game_id is None:
         return 422, {"ok": False, "error": "game-unresolved",
                      "message": "无法识别该详情页所属游戏（已尝试本地库与页面面包屑）；"
@@ -561,39 +565,45 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
         return _target_not_selected(state, game_id)
     ensure_collection(state)
 
-    fields = _parse_detail_fields(html)
-    title, attributes = P.parse_detail_attributes(html)
-    if payload.get("batch_id"):
+    parse_started=time.perf_counter()
+    fields = structured["fields"] if structured is not None else _parse_detail_fields(html)
+    title, attributes = (structured["title"],structured["attributes"]) if structured is not None else P.parse_detail_attributes(html)
+    if payload.get("batch_id") and structured is None:
         attributes.update(P.parse_detail_public_fields(html))
-    extraction = X.extract_listing(X.seed_keywords(game_id=game_id),
+    extraction = X.Extraction(listing_id,dict(structured["features"])) if structured is not None else X.extract_listing(X.seed_keywords(game_id=game_id),
                                    listing_id=listing_id, title=title, card_fields=attributes)
-    if game_id == 10302:
+    if game_id == 10302 and structured is None:
         extraction.features[W.FEATURE] = W.observe(
             title, P.detail_product_text(html), attributes, extraction.features)
     extraction.features["_detail_fields"] = list(attributes)
     if payload.get("batch_id"):
-        product_text=P.detail_product_text(html)
+        product_text=structured["text"] if structured is not None else P.detail_product_text(html)
         labels={"level":r"等级|\d+级","yellow_cnt":r"黄数|\d+黄","five_star_chars":r"五星角色",
                 "five_star_weapons":r"五星武器","wuwa_resources":r"星声|月相|珊瑚|结晶|唤声|唤月",
                 "server":r"区服|服务器|官服|B服","publish_time_text":r"发布|上架","favorites_cnt":r"收藏"}
         values={**attributes,**fields,"wuwa_resources":next((extraction.features.get(k) for k,_ in X.WUWA_RESOURCES if extraction.features.get(k) is not None),None)}
-        acquired=CJ.now().isoformat()
+        acquired=structured["observed_at"] if structured is not None else CJ.now().isoformat()
         extraction.features["_introduction"]={"complete":bool(title),"source":"detail","acquired_at":acquired,"reused":False}
         extraction.features["_field_sources"]={key:{"source":"detail","acquired_at":acquired}
             for key,value in {**attributes,**fields,**{k:v for k,v in extraction.features.items() if not k.startswith("_")}}.items() if value is not None}
         extraction.features["_public_text"]={"acquired_at":acquired,"source":"detail",
             "field_states":{key:"obtained" if values.get(key) is not None else "parse_failed"
                 if re.search(pattern,product_text) else "unreported" for key,pattern in labels.items()}}
-    if game_id == 10302:
+    if game_id == 10302 and structured is None:
         from . import exploration as E
         maps = E.parse_html(html)
         if maps:
             extraction.features[E.FEATURE] = maps
     extraction.features["_detail_rosters"] = [key for key in
         ("five_star_character_chains", "five_star_weapon_refinements") if key in extraction.features]
+    if structured is not None:
+        for key in ("_introduction","_public_text"):
+            if key in extraction.features: extraction.features[key]["source"]="detail-response"
+        for field in extraction.features.get("_field_sources",{}).values():field["source"]="detail-response"
+    parse_duration_ms=(time.perf_counter()-parse_started)*1000+(structured.get("parse_duration_ms",0) if structured is not None else 0)
     now = _dt.datetime.now()
     if extraction.features.get("wuwa_map_exploration"):
-        extraction.features["_wuwa_map_source"] = {"collected_at": now.isoformat(timespec="seconds")}
+        extraction.features["_wuwa_map_source"] = {"collected_at": structured["observed_at"] if structured is not None else now.isoformat(timespec="seconds")}
     run_id = new_run_id(f"{task.task_id}-plugin", now=now)
     raw_dir = raw_dir_for(state.settings, task.task_id, run_id, now=now)
     meta = {"url": str(payload.get("url") or ""), "page_type": "detail",
@@ -605,17 +615,23 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
             "note": "前端 B：读取已加载详情 DOM，回填对应列表轮次", **fields}
     if payload.get("batch_id"):
         from .evidence import compact
-        html = compact(html, page_type="detail")
-        meta["content_hash"] = hashlib.sha256(html.encode()).hexdigest()
+        html = compact(html, page_type="detail") if structured is None else ""
+        meta["content_hash"] = hashlib.sha256((html if structured is None else CC.encode(structured)).encode()).hexdigest()
         meta["batch_id"] = payload["batch_id"]
-    _write_raw(raw_dir, f"detail_{listing_id}", html=html, meta=meta)
+    if structured is not None:
+        meta.update(page_type="detail_data",parser_version="detail-data-v1",structured=structured)
+        _write_raw(raw_dir, f"detail_{listing_id}", html=None,meta=meta,dump_html=False)
+    else:
+        _write_raw(raw_dir, f"detail_{listing_id}", html=html, meta=meta)
 
     entry = {"listing_id": listing_id, "viewers_masked": fields["viewers_masked"],
              "favorites_cnt": fields["favorites_cnt"], "attributes": attributes,
              "features": extraction.features, "snapshot_at": snapshot_at, "game_id": game_id,
              "backfill": backfill, "title": title, "retry_token": payload.get("retry_token"),
              "batch": payload if payload.get("batch_id") else None}
+    commit_started=time.perf_counter()
     updated = _apply_detail(state, entry)
+    commit_duration_ms=(time.perf_counter()-commit_started)*1000
     # 返回合并后的实际状态；本次未公示不能遮盖已保存的数量/精炼。
     weapon_features, weapon_count = extraction.features, attributes.get("five_star_weapons")
     if updated:
@@ -651,6 +667,7 @@ def _ingest_detail(state: GatewayState, payload: dict[str, Any]) -> tuple[int, d
                and len(weapon_features.get("five_star_weapon_refinements") or []) == weapon_count
                and not any(m["key"] == "five_star_weapon_refinements" for m in entry.get("missing", [])))),
            "snapshot_rows_updated": updated,
+           "parse_duration_ms":round(parse_duration_ms,2),"commit_duration_ms":round(commit_duration_ms,2),
            "analysis_sync": entry.get("analysis_sync"),
            "map_exploration": extraction.features.get("wuwa_map_exploration"),
            "missing": entry.get("missing", []),
@@ -1145,7 +1162,7 @@ def handle_ingest(state: GatewayState, path: str, body: bytes) -> tuple[int, dic
                     return _ingest_text(state, payload)
             if payload.get("batch_id"):
                 ensure_collection(state)
-                batch = CJ.validate_ingest(state, payload, detail=path == "/ingest/detail") if path in ("/ingest/cards", "/ingest/detail") else None
+                batch = CJ.validate_ingest(state, payload, detail=path in ("/ingest/detail", "/ingest/detail-data")) if path in ("/ingest/cards", "/ingest/detail", "/ingest/detail-data") else None
         except (ValueError, TypeError, KeyError) as exc:
             return 409, {"ok": False, "error": str(exc)}
         if path in ("/collection/check", "/collection/retry"):
@@ -1155,8 +1172,32 @@ def handle_ingest(state: GatewayState, path: str, body: bytes) -> tuple[int, dic
             if payload.get("batch_id"):
                 result["gateway_duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
             return status, result
-        if path == "/ingest/detail":
-            status, result = _ingest_detail(state, payload)
+        if path in ("/ingest/detail", "/ingest/detail-data"):
+            structured=None
+            if path.endswith("detail-data"):
+                try:
+                    if not payload.get("batch_id"):
+                        raise ValueError("structured-detail-requires-batch")
+                    from .detail_data import parse
+                    if not isinstance(payload.get("attempt_id"),str) or not re.fullmatch(r"[0-9A-Za-z:._-]{1,180}",payload["attempt_id"]):
+                        raise ValueError("invalid-detail-attempt")
+                    parse_started=time.perf_counter()
+                    structured=parse(payload)
+                    structured["parse_duration_ms"]=(time.perf_counter()-parse_started)*1000
+                    with PL.run_lock(state.settings),db.connect(state.settings.paths.db,read_only=True) as conn:
+                        saved=CC.current_data(conn,payload["listing_id"])
+                        permit=conn.execute("SELECT permit_id,CAST(issued_at AS VARCHAR) FROM collection_access WHERE batch_id=? AND listing_id=? AND action='detail' ORDER BY issued_at DESC LIMIT 1",[payload["batch_id"],payload["listing_id"]]).fetchone()
+                    if not permit or permit[0]!=payload.get("access_permit") or _dt.datetime.fromisoformat(structured["observed_at"]) < _dt.datetime.fromisoformat(permit[1]):
+                        raise ValueError("stale-detail-attempt")
+                    if not saved or abs(float(saved["price_yuan"])-structured["price_yuan"])>0.005:
+                        raise ValueError("detail-price-conflict")
+                    normalized=lambda t:re.sub(r"[^\w]","",t or "")
+                    prefix=normalized(saved.get("title"))[:100]
+                    if len(prefix)>=24 and not normalized(structured["title"]).startswith(prefix):
+                        raise ValueError("detail-title-conflict")
+                except (ValueError,TypeError,KeyError) as exc:
+                    return 422,{"ok":False,"error":str(exc),"fallback":True}
+            status, result = _ingest_detail(state, payload,structured=structured)
             if payload.get("batch_id"):
                 result["gateway_duration_ms"] = round((time.perf_counter() - started) * 1000, 2)
             return status, result
@@ -1978,7 +2019,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._send(*handle_config_post(self.state, raw))
             return
-        if path not in {"/ingest/cards", "/ingest/detail", "/collection/check", "/collection/retry", *COLLECTION_PROTOCOL_PATHS}:
+        if path not in {"/ingest/cards", "/ingest/detail", "/ingest/detail-data", "/collection/check", "/collection/retry", *COLLECTION_PROTOCOL_PATHS}:
             self._send(404, {"ok": False, "error": "unknown-path"})
             return
         origin = self._origin()
