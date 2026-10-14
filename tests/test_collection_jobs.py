@@ -72,6 +72,38 @@ def test_dashboard_read_cannot_interrupt_next_detail_permit(job_state, monkeypat
     assert write_opened.is_set()
 
 
+@pytest.mark.parametrize("read_mode", ["candidates", "prepare"])
+def test_backfill_read_does_not_invert_config_lock_order(job_state, monkeypatch, read_mode):
+    """Concurrent /config and candidates use state-before-database ordering."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from pxb7 import backfill
+
+    _post(job_state, "/ingest/cards", CARDS_PAYLOAD)
+
+    opened, release = threading.Event(), threading.Event()
+    original = db.connect
+
+    def held_connect(path, **kwargs):
+        conn = original(path, **kwargs)
+        opened.set()
+        assert release.wait(5)
+        return conn
+
+    monkeypatch.setattr(db, "connect", held_connect)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        reading = executor.submit(getattr(backfill, read_mode), job_state, {"all": True})
+        try:
+            assert opened.wait(5)
+            acquired = job_state.lock.acquire(blocking=False)
+            if acquired:
+                job_state.lock.release()
+            assert not acquired, "config could own state while candidates owns database: deadlock"
+        finally:
+            release.set()
+        assert reading.result(timeout=5)["ok"]
+
+
 def test_logical_target_frozen_and_protocol_rejections(job_state):
     identity, ack = begin(job_state, target_count=450)
     assert ack["config"]["target_count"] == 450 and ack["config"]["block_size"] == 200

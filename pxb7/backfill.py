@@ -158,7 +158,8 @@ def candidates(state, query: dict) -> dict:
     payload = {k: v[0] if isinstance(v, list) else v for k, v in query.items()}
     offset = max(0, int(payload.get("offset", 0)))
     limit = max(1, min(200, int(payload.get("limit", 10))))
-    with PL.run_lock(state.settings), db.connect(state.settings.paths.db, read_only=True) as conn:
+    # _scope/match_task read state; use the same state -> database order as writers.
+    with state.lock, PL.run_lock(state.settings), db.connect(state.settings.paths.db, read_only=True) as conn:
         rows, games = _candidates(state, conn, payload)
     results = load_results(state)
     for row in rows:
@@ -175,7 +176,7 @@ def candidates(state, query: dict) -> dict:
 
 
 def prepare(state, payload: dict) -> dict:
-    with PL.run_lock(state.settings):
+    with state.lock, PL.run_lock(state.settings):
         conn = db.connect(state.settings.paths.db)
         try:
             rows, _ = _candidates(state, conn, payload)
