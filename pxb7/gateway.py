@@ -1327,14 +1327,15 @@ def handle_collection(state: GatewayState, path: str, payload: dict) -> tuple[in
 def _game_db_counts(state: GatewayState) -> dict[int, dict[str, Any]]:
     """按游戏聚合入库量（fct_listing_snapshot ⨝ dim_listing）；库不可用返回空。"""
     try:
-        conn = db.connect(state.settings.paths.db, read_only=True)
-        try:
-            rows = conn.execute(
-                "SELECT l.game_id, count(*), count(DISTINCT l.listing_id), max(s.snapshot_at)"
-                " FROM fct_listing_snapshot s JOIN dim_listing l ON l.listing_id = s.listing_id"
-                " GROUP BY 1").fetchall()
-        finally:
-            conn.close()
+        with PL.run_lock(state.settings):
+            conn = db.connect(state.settings.paths.db, read_only=True)
+            try:
+                rows = conn.execute(
+                    "SELECT l.game_id, count(*), count(DISTINCT l.listing_id), max(s.snapshot_at)"
+                    " FROM fct_listing_snapshot s JOIN dim_listing l ON l.listing_id = s.listing_id"
+                    " GROUP BY 1").fetchall()
+            finally:
+                conn.close()
     except Exception:
         return {}
     out: dict[int, dict[str, Any]] = {}
@@ -1510,37 +1511,38 @@ def handle_listings(state: GatewayState, query: Mapping[str, Any]) -> dict[str, 
     payload: dict[str, Any] = {"ok": True, "offset": offset, "limit": limit, "mode": "history" if history_mode else "rounds",
                                "game_id": game_id, "columns": _columns_payload(columns)}
     try:
-        conn = db.connect(state.settings.paths.db, read_only=True)
-        try:
-            total = conn.execute(f"SELECT count(*){base}{where}", params).fetchone()[0]
-            mail_count, viewer_count, publish_count = conn.execute(
-                "SELECT count(NULLIF(trim(s.mail_status), '')), count(s.viewers_masked),"
-                f" count(NULLIF(trim(s.publish_time_text), '')){base}{where}", params).fetchone()
-            columns = tuple(column for column in columns
-                            if not (column[0] == "mail_status" and not mail_count)
-                            and not (column[0] == "published_at" and not publish_count))
-            payload["columns"] = _columns_payload(columns)
-            payload["show_viewers"] = bool(viewer_count)
-            games = [{"game_id": int(r[0]), "game_name": r[1] or str(r[0]), "rows": r[2]}
-                     for r in conn.execute(
-                         "SELECT l.game_id, max(g.game_name), count(*)"
-                         f"{base} GROUP BY l.game_id ORDER BY count(*) DESC").fetchall()]
-            rows = conn.execute(
-                "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.viewers_masked,"
-                " s.favorites_cnt, s.extracted_features, l.game_id, g.game_name,"
-                f"{select_cols.rstrip(',')}{base}{where}"
-                " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT ? OFFSET ?",
-                [*params, limit, offset]).fetchall()
-            revisions = {}
-            if history_mode:
-                for listing_id in {row[0] for row in rows}:
-                    r = conn.execute("SELECT version,captured_at,diff_json FROM fct_listing_revision"
-                                     " WHERE listing_id=? ORDER BY version DESC LIMIT 1", [listing_id]).fetchone()
-                    revisions[listing_id] = {"versions": r[0] if r else 0,
-                                            "changed_at": r[1].isoformat() if r else None,
-                                            "latest_diff": json.loads(r[2]) if r else []}
-        finally:
-            conn.close()
+        with PL.run_lock(state.settings):
+            conn = db.connect(state.settings.paths.db, read_only=True)
+            try:
+                total = conn.execute(f"SELECT count(*){base}{where}", params).fetchone()[0]
+                mail_count, viewer_count, publish_count = conn.execute(
+                    "SELECT count(NULLIF(trim(s.mail_status), '')), count(s.viewers_masked),"
+                    f" count(NULLIF(trim(s.publish_time_text), '')){base}{where}", params).fetchone()
+                columns = tuple(column for column in columns
+                                if not (column[0] == "mail_status" and not mail_count)
+                                and not (column[0] == "published_at" and not publish_count))
+                payload["columns"] = _columns_payload(columns)
+                payload["show_viewers"] = bool(viewer_count)
+                games = [{"game_id": int(r[0]), "game_name": r[1] or str(r[0]), "rows": r[2]}
+                         for r in conn.execute(
+                             "SELECT l.game_id, max(g.game_name), count(*)"
+                             f"{base} GROUP BY l.game_id ORDER BY count(*) DESC").fetchall()]
+                rows = conn.execute(
+                    "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.viewers_masked,"
+                    " s.favorites_cnt, s.extracted_features, l.game_id, g.game_name,"
+                    f"{select_cols.rstrip(',')}{base}{where}"
+                    " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT ? OFFSET ?",
+                    [*params, limit, offset]).fetchall()
+                revisions = {}
+                if history_mode:
+                    for listing_id in {row[0] for row in rows}:
+                        r = conn.execute("SELECT version,captured_at,diff_json FROM fct_listing_revision"
+                                         " WHERE listing_id=? ORDER BY version DESC LIMIT 1", [listing_id]).fetchone()
+                        revisions[listing_id] = {"versions": r[0] if r else 0,
+                                                "changed_at": r[1].isoformat() if r else None,
+                                                "latest_diff": json.loads(r[2]) if r else []}
+            finally:
+                conn.close()
     except Exception as exc:                  # 库不可用不拖垮看板
         payload["error"] = f"{type(exc).__name__}: {exc}"
         payload["rows"], payload["total"], payload["games"] = [], 0, []
@@ -1703,12 +1705,13 @@ def handle_open_folder(state: GatewayState, raw: Any) -> tuple[int, dict[str, An
 
 def handle_status(state: GatewayState) -> dict[str, Any]:
     try:
-        conn = db.connect(state.settings.paths.db, read_only=True)
-        try:
-            counts = db.table_counts(conn)
-            latest = db.latest_round(conn)
-        finally:
-            conn.close()
+        with PL.run_lock(state.settings):
+            conn = db.connect(state.settings.paths.db, read_only=True)
+            try:
+                counts = db.table_counts(conn)
+                latest = db.latest_round(conn)
+            finally:
+                conn.close()
         db_payload = {"latest_round": latest.isoformat(timespec="seconds") if latest else None,
                       "snapshot_rows": counts.get("fct_listing_snapshot", 0),
                       "listings": counts.get("dim_listing", 0)}
@@ -1763,44 +1766,45 @@ def build_stats_payload(state: GatewayState) -> dict[str, Any]:
 
     db_payload: dict[str, Any] = {}
     try:
-        conn = db.connect(state.settings.paths.db, read_only=True)
-        try:
-            counts = db.table_counts(conn)
-            latest = db.latest_round(conn)
-            rounds = conn.execute(
-                "SELECT snapshot_at, count(*) AS rows, count(DISTINCT listing_id) AS listings"
-                " FROM fct_listing_snapshot GROUP BY 1 ORDER BY 1 DESC LIMIT 14"
-            ).fetchall()
-            hist = conn.execute(
-                "SELECT CAST(floor(price_yuan / 200) AS INTEGER) AS b, count(*)"
-                " FROM fct_listing_snapshot WHERE price_yuan IS NOT NULL AND price_yuan < 2000"
-                " GROUP BY b ORDER BY b").fetchall()
-            top_keywords = conn.execute(
-                "SELECT k.keyword, count(*) AS hits FROM fct_listing_keyword f"
-                " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
-                " GROUP BY 1 ORDER BY hits DESC LIMIT 10").fetchall()
-            # 词表命中按游戏分组（看板按所选游戏展示该游戏自己的词条，不混算别家）
-            keywords_by_game = conn.execute(
-                "SELECT l.game_id, g.game_name, k.keyword, count(*) AS hits"
-                " FROM fct_listing_keyword f"
-                " JOIN dim_listing l ON l.listing_id = f.listing_id"
-                " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
-                " LEFT JOIN dim_game g ON g.game_id = l.game_id"
-                " GROUP BY 1, 2, 3 ORDER BY hits DESC").fetchall()
-            latest_listings = conn.execute(
-                "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.level, s.yellow_cnt,"
-                " s.server, s.mail_status, s.viewers_masked, s.favorites_cnt,"
-                " l.game_id, g.game_name"
-                " FROM fct_listing_snapshot s"
-                " LEFT JOIN dim_listing l ON l.listing_id = s.listing_id"
-                " LEFT JOIN dim_game g ON g.game_id = l.game_id"
-                " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT 15"
-            ).fetchall()
-            via = conn.execute(
-                "SELECT collected_via, count(*) FROM fct_listing_snapshot GROUP BY 1"
-            ).fetchall()
-        finally:
-            conn.close()
+        with PL.run_lock(state.settings):
+            conn = db.connect(state.settings.paths.db, read_only=True)
+            try:
+                counts = db.table_counts(conn)
+                latest = db.latest_round(conn)
+                rounds = conn.execute(
+                    "SELECT snapshot_at, count(*) AS rows, count(DISTINCT listing_id) AS listings"
+                    " FROM fct_listing_snapshot GROUP BY 1 ORDER BY 1 DESC LIMIT 14"
+                ).fetchall()
+                hist = conn.execute(
+                    "SELECT CAST(floor(price_yuan / 200) AS INTEGER) AS b, count(*)"
+                    " FROM fct_listing_snapshot WHERE price_yuan IS NOT NULL AND price_yuan < 2000"
+                    " GROUP BY b ORDER BY b").fetchall()
+                top_keywords = conn.execute(
+                    "SELECT k.keyword, count(*) AS hits FROM fct_listing_keyword f"
+                    " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
+                    " GROUP BY 1 ORDER BY hits DESC LIMIT 10").fetchall()
+                # 词表命中按游戏分组（看板按所选游戏展示该游戏自己的词条，不混算别家）
+                keywords_by_game = conn.execute(
+                    "SELECT l.game_id, g.game_name, k.keyword, count(*) AS hits"
+                    " FROM fct_listing_keyword f"
+                    " JOIN dim_listing l ON l.listing_id = f.listing_id"
+                    " JOIN dim_keyword k ON k.keyword_id = f.keyword_id"
+                    " LEFT JOIN dim_game g ON g.game_id = l.game_id"
+                    " GROUP BY 1, 2, 3 ORDER BY hits DESC").fetchall()
+                latest_listings = conn.execute(
+                    "SELECT s.listing_id, s.snapshot_at, s.price_yuan, s.level, s.yellow_cnt,"
+                    " s.server, s.mail_status, s.viewers_masked, s.favorites_cnt,"
+                    " l.game_id, g.game_name"
+                    " FROM fct_listing_snapshot s"
+                    " LEFT JOIN dim_listing l ON l.listing_id = s.listing_id"
+                    " LEFT JOIN dim_game g ON g.game_id = l.game_id"
+                    " ORDER BY s.snapshot_at DESC, s.listing_id DESC LIMIT 15"
+                ).fetchall()
+                via = conn.execute(
+                    "SELECT collected_via, count(*) FROM fct_listing_snapshot GROUP BY 1"
+                ).fetchall()
+            finally:
+                conn.close()
         db_payload = {
             "snapshot_rows": counts.get("fct_listing_snapshot", 0),
             "listings": counts.get("dim_listing", 0),

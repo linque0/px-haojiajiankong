@@ -30,6 +30,48 @@ def cards(state, identity):
     return parsed.cards, ack
 
 
+@pytest.mark.parametrize("reader", [G.build_stats_payload, G.handle_status,
+                                   lambda state: G.handle_listings(state, {}), G.targets_payload])
+def test_dashboard_read_cannot_interrupt_next_detail_permit(job_state, monkeypatch, reader):
+    """A live dashboard read must close before a differently configured writer opens."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    identity, _ = begin(job_state)
+    opened, release, attempted, write_opened = (threading.Event() for _ in range(4))
+    original = db.connect
+
+    def blocked_connect(path, **kwargs):
+        conn = original(path, **kwargs)
+        if kwargs.get("read_only") and not opened.is_set():
+            opened.set()
+            assert release.wait(5)
+        elif not kwargs.get("read_only"):
+            write_opened.set()
+        return conn
+
+    monkeypatch.setattr(db, "connect", blocked_connect)
+
+    def next_permit():
+        attempted.set()
+        return _post(job_state, "/collection/batch/access", {
+            **identity, "action": "detail", "id": "2428022628844555568"})
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reading = executor.submit(reader, job_state)
+        try:
+            assert opened.wait(5)
+            writing = executor.submit(next_permit)
+            assert attempted.wait(5)
+            assert not write_opened.wait(0.15)
+        finally:
+            release.set()
+        assert "error" not in reading.result(timeout=5).get("db", {})
+        code, ack = writing.result(timeout=5)
+    assert code == 200 and ack["ok"], ack
+    assert write_opened.is_set()
+
+
 def test_logical_target_frozen_and_protocol_rejections(job_state):
     identity, ack = begin(job_state, target_count=450)
     assert ack["config"]["target_count"] == 450 and ack["config"]["block_size"] == 200
