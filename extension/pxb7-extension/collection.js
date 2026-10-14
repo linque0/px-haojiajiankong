@@ -192,6 +192,7 @@
     async function verificationPause(task, tabId, stage) {
       if (task.status !== "waiting_verification") {
         task.verification = {tabId, stage, phase:task.phase, startedAt:Date.now()};
+        task.verification_count = (task.verification_count || 0) + 1;
         if (task.workerTab) task.nonce = `${task.id}:${task.processed}:verification:${Date.now()}`;
         task.status = "waiting_verification";
         (task.events ||= []).push({type:"challenge_detected",at:Date.now(),id:task.currentId,stage});
@@ -460,6 +461,8 @@
           return pool.resume(task,slot);
         }
         task.status = "running"; task.phase = task.verification.phase;
+        task.timings ||= {};
+        task.timings.verification_ms = (task.timings.verification_ms || 0) + Date.now()-task.verification.startedAt;
         (task.events ||= []).push({type:"challenge_cleared",at:Date.now(),id:task.currentId,
           waiting_ms:Date.now()-task.verification.startedAt,intervention:"unknown"});
         delete task.verification;

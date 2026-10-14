@@ -44,6 +44,21 @@ const msg=j=>({taskId:j.taskId,nonce:j.nonce,payload:{listing_id:j.id,url:j.url,
   assert.equal(done.status,'done');assert.equal(done.complete_count,4);assert.equal(done.in_flight,0);
   assert.equal(f.ingested.length,4);assert.deepEqual(f.closed.sort(),[20,21]);assert.ok(done.completedAt && done.elapsed_ms>=0);
 
+  const sourceRisk=setup(1),originalNow=Date.now;
+  let clock=originalNow();Date.now=()=>clock;
+  try {
+    const begin=await sourceRisk.q.begin(source,{protocol_version:1,mode:'detail',total:4});
+    await sourceRisk.q.verificationPause(source,{taskId:begin.taskId,pageUrl:source.tab.url});
+    clock+=5432;
+    await sourceRisk.q.verificationResume(source,{taskId:begin.taskId,pageUrl:source.tab.url});
+    await sourceRisk.q.start(source,{taskId:begin.taskId,round:'2026-10-14T01:00:00',items});
+    const resumed=(await sourceRisk.q.progress()).progress;
+    assert.equal(resumed.verification_count,1,'source challenge survives transition into detail pool');
+    assert.equal(resumed.timings.verification_ms,5432,'source wait is not reset to zero');
+    assert.equal(resumed.timings.discovery_ms,5432,'end-to-end discovery includes verification wait');
+    await sourceRisk.q.cancel();
+  } finally {Date.now=originalNow;}
+
   const risk=setup();await start(risk);const ra=await job(risk,20,items[0]),rb=await job(risk,21,items[1]);
   const pause=await risk.q.verificationPause(sender(20,items[0]),{taskId:ra.taskId,nonce:ra.nonce,pageUrl:ra.url});
   assert.equal(pause.paused,true);assert.equal((await risk.q.progress()).progress.status,'waiting_verification');
@@ -68,6 +83,7 @@ const msg=j=>({taskId:j.taskId,nonce:j.nonce,payload:{listing_id:j.id,url:j.url,
   fallback.setResponse({ok:true,data:{ok:true,snapshot_rows_updated:1,missing:[]}});
   const dom=msg(fj);delete dom.payload.schema_version;dom.payload.html='public DOM';
   await fallback.q.result(sender(20,items[0]),dom);assert.equal(fallback.ingested.at(-1).p,'/ingest/detail');
+  assert.equal((await fallback.q.progress()).progress.dom_fallback,1);
   await fallback.q.cancel();
 
   const retry=setup(1);await start(retry);const rj=await job(retry,20,items[0]);

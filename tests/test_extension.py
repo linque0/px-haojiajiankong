@@ -23,7 +23,7 @@ def _manifest() -> dict:
 def test_manifest_v3_contract() -> None:
     m = _manifest()
     assert m["manifest_version"] == 3, "必须是 MV3 独立扩展"
-    assert m["name"] and m["version"] == "0.5.16"
+    assert m["name"] and m["version"] == "0.5.17"
     assert m["background"]["service_worker"] == "background.js"
     assert m["action"]["default_popup"] == "popup.html"
     assert set(m["permissions"]) <= {"storage", "tabs", "clipboardWrite", "alarms",

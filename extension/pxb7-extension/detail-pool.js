@@ -47,7 +47,9 @@
       const c=task.batch.config;
         task.concurrency=Number.isInteger(c.detail_concurrency) && c.detail_concurrency>=1 && c.detail_concurrency<=8 ? c.detail_concurrency:1;
       task.slots=[];task.complete_count=0;task.response_complete=0;task.dom_fallback=0;
-      task.verification_count=0;task.timings={parse_ms:0,commit_ms:0,discovery_ms:Date.now()-task.startedAt,request_ms:0,submit_ms:0,gateway_ms:0,verification_ms:0};
+      task.verification_count ||= 0;
+      task.timings={parse_ms:0,commit_ms:0,discovery_ms:Date.now()-task.startedAt,request_ms:0,submit_ms:0,gateway_ms:0,
+        verification_ms:task.timings?.verification_ms || 0};
       task.items.forEach(i=>{i.state="pending";});
       try {for(let i=0;i<Math.min(task.concurrency,task.items.length);i++)task.slots.push({tabId:(await chrome.tabs.create({url:"about:blank",active:false})).id,index:null});}
       catch(_){return finish(task,"error","快速工作标签页创建失败");}
